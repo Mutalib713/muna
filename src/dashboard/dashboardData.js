@@ -21,10 +21,3 @@ export const initialFlags = [
   { id: 'F-020', student: 'Fatima Yusuf', initials: 'FY', assessment: 'Earth science review', signal: 'Multiple answers submitted in an unusually short time', detail: '4 answers in 22 seconds', level: 'Review' },
   { id: 'F-019', student: 'Ethan Williams', initials: 'EW', assessment: 'Photosynthesis and energy', signal: 'Repeated page focus changes during assessment', detail: '12 focus changes recorded', level: 'Review' },
 ]
-
-export const navigation = [
-  { label: 'Overview', icon: 'grid' },
-  { label: 'Question bank', icon: 'book' },
-  { label: 'Answer review', icon: 'check' },
-  { label: 'Integrity flags', icon: 'shield' },
-]
