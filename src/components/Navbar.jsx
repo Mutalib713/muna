@@ -36,6 +36,7 @@ export default function Navbar({ onOpenModal }) {
         </nav>
 
         <div className="nav-actions">
+          <a className="btn btn-outline" href="/login">Log in</a>
           <button
             type="button"
             className="btn btn-outline"
