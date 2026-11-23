@@ -4,7 +4,8 @@ import AnswerTable from '../components/AnswerTable'
 
 // Receives the `dashboard` context bag from AdminDashboard.jsx.
 export default function Overview({ dashboard }) {
-  const { questions, answers, pendingAnswers, unresolvedFlags, navigate, openQuestionModal, selectAnswer } = dashboard
+  const { questions, answers, summary, pendingAnswers, unresolvedFlags, navigate, openQuestionModal, selectAnswer } = dashboard
+  const chartMax = Math.max(1, ...summary.weeklyActivity.map((item) => item.count))
 
   return (
     <>
@@ -13,8 +14,8 @@ export default function Overview({ dashboard }) {
         <button className="button button-primary" onClick={() => { navigate('Question bank'); openQuestionModal() }}><Icon name="plus" size={17} /> Create question</button>
       </div>
       <div className="stat-grid">
-        <StatCard label="Total students" value="1,248" change="+12.8%" icon="users" tone="blue" caption="vs. last month" />
-        <StatCard label="Questions in bank" value={questions.length.toLocaleString()} change="Across 8 topics" icon="book" tone="purple" />
+        <StatCard label="Total students" value={summary.totalStudents.toLocaleString()} change="Current roster" icon="users" tone="blue" />
+        <StatCard label="Questions in bank" value={questions.length.toLocaleString()} change="Saved questions" icon="book" tone="purple" />
         <StatCard label="Awaiting review" value={pendingAnswers.toString().padStart(2, '0')} change="Needs your attention" icon="clock" tone="amber" />
         <StatCard label="Integrity flags" value={unresolvedFlags.toString().padStart(2, '0')} change="Require careful review" icon="shield" tone="rose" />
       </div>
@@ -22,8 +23,8 @@ export default function Overview({ dashboard }) {
         <section className="panel activity-panel">
           <div className="panel-heading"><div><h2>Assessment activity</h2><p>Submissions over the past week</p></div><button className="select-button">This week <span>⌄</span></button></div>
           <div className="chart" role="img" aria-label="Bar chart showing assessment activity across the week">
-            <div className="chart-grid"><span>200</span><span>150</span><span>100</span><span>50</span><span>0</span></div>
-            <div className="chart-bars">{[['Mon', 54], ['Tue', 73], ['Wed', 62], ['Thu', 89], ['Fri', 68], ['Sat', 42], ['Sun', 57]].map(([day, height]) => <div className="chart-column" key={day}><div className="bar-track"><span className="bar" style={{ height: `${height}%` }} /></div><span className="chart-day">{day}</span></div>)}</div>
+            <div className="chart-grid"><span>{chartMax}</span><span>{Math.round(chartMax * 0.75)}</span><span>{Math.round(chartMax * 0.5)}</span><span>{Math.round(chartMax * 0.25)}</span><span>0</span></div>
+            <div className="chart-bars">{summary.weeklyActivity.map(({ day, count }) => <div className="chart-column" key={day}><div className="bar-track"><span className="bar" style={{ height: `${count === 0 ? 2 : Math.max(8, count / chartMax * 100)}%` }} /></div><span className="chart-day">{day}</span></div>)}</div>
           </div>
         </section>
         <section className="panel attention-panel">

@@ -1,8 +1,14 @@
 import { useEffect, useRef, useState } from 'react'
-import { initialQuestions, initialAnswers, initialFlags, initialMembers, initialInvitations, getInvitationState } from './dashboardData'
+import { initialMembers, initialInvitations, getInvitationState } from './dashboardData'
 import { dashboardViews } from './views/registry'
 import Icon from './DashboardIcon'
-import StudentCell from './components/StudentCell'
+import AdminLoginScreen from './components/AdminLoginScreen'
+import AnswerReviewModal from './components/AnswerReviewModal'
+import DashboardSidebar from './components/DashboardSidebar'
+import DashboardTopbar from './components/DashboardTopbar'
+import FlagReviewModal from './components/FlagReviewModal'
+import QuestionModal from './components/QuestionModal'
+import apiRequest, { cacheCsrfToken, clearCsrfTokenCache, loadDashboardData, requestCsrfToken } from './services/adminApi'
 import './Dashboard.css'
 
 // Admin workspace dashboard (originally built by Priscilla Etornam Gbordjuer
@@ -11,8 +17,9 @@ import './Dashboard.css'
 //
 // CONTEXT CONTRACT: every view in views/registry.js receives a single
 // `dashboard` prop — the object built in this component. Fields:
-//   questions, answers, flags          demo records (dashboardData.js)
-//   members, invitations               org records (dashboardData.js)
+//   questions, answers, flags          records loaded from the admin API
+//   summary, mentees, assessments      API-backed overview/people/assessments
+//   members, invitations               org-plane demo records (dashboardData.js)
 //   activeInvites                      count of Active invitations
 //   search                             topbar search string
 //   answerFilter, setAnswerFilter      Answer review filter state
@@ -24,7 +31,9 @@ import './Dashboard.css'
 //   handleQuestionUpload(event)        import questions JSON file
 //   uploadMessage, uploadError         upload feedback strings
 //   fileInput                          ref to the hidden file input
-//   markFlagReviewed(flagId)           mark an integrity flag reviewed
+//   selectFlag, markFlagReviewed(...)  integrity review modal + API decision
+//   flagReviewNote, setFlagReviewNote, flagReviewError
+//   createAssessment, updateAssessmentStatus
 //   updateMemberRole(id, role)         change a member's organisation role
 //   toggleMemberStatus(id)             suspend / restore a member
 //   removeMember(id)                   remove a member from the organisation
@@ -32,33 +41,88 @@ import './Dashboard.css'
 //                                      create an invitation, returns it
 //   revokeInvitation(id)               revoke an outstanding invitation
 //
-// Demo data lives in dashboardData.js until Phase 0/1 wires a real backend.
+// Members/invitations remain local demo records until the backend exposes
+// organisation endpoints; everything else is persisted in SQLite.
 export default function AdminDashboard() {
+  const [authStatus, setAuthStatus] = useState('checking')
+  const [admin, setAdmin] = useState(null)
+  const [csrfToken, setCsrfToken] = useState('')
+  const [loginEmail, setLoginEmail] = useState('')
+  const [loginPassword, setLoginPassword] = useState('')
+  const [loginError, setLoginError] = useState('')
+  const [loginLoading, setLoginLoading] = useState(false)
+  const [apiError, setApiError] = useState('')
+  const [summary, setSummary] = useState({ totalStudents: 0, totalQuestions: 0, weeklyActivity: [] })
+  const [mentees, setMentees] = useState([])
+  const [assessments, setAssessments] = useState([])
   const [activeView, setActiveView] = useState('Overview')
-  const [questions, setQuestions] = useState(initialQuestions)
-  const [answers, setAnswers] = useState(initialAnswers)
-  const [flags, setFlags] = useState(initialFlags)
+  const [questions, setQuestions] = useState([])
+  const [answers, setAnswers] = useState([])
+  const [flags, setFlags] = useState([])
   const [members, setMembers] = useState(initialMembers)
   const [invitations, setInvitations] = useState(initialInvitations)
   const [search, setSearch] = useState('')
   const [answerFilter, setAnswerFilter] = useState('All submissions')
   const [selectedAnswer, setSelectedAnswer] = useState(null)
+  const [answerFeedback, setAnswerFeedback] = useState('')
+  const [answerReviewError, setAnswerReviewError] = useState('')
+  const [selectedFlag, setSelectedFlag] = useState(null)
+  const [flagReviewNote, setFlagReviewNote] = useState('')
+  const [flagReviewError, setFlagReviewError] = useState('')
   const [questionModalOpen, setQuestionModalOpen] = useState(false)
   const [uploadMessage, setUploadMessage] = useState('')
   const [uploadError, setUploadError] = useState('')
   const [newQuestion, setNewQuestion] = useState({ prompt: '', options: ['', '', '', ''], correctAnswer: '' })
   const fileInput = useRef(null)
 
+  useEffect(() => {
+    let active = true
+    async function initialize() {
+      try {
+        const { csrfToken: token } = await requestCsrfToken()
+        if (!active) return
+        setCsrfToken(token)
+        try {
+          const { user } = await apiRequest('/auth/me')
+          const data = await loadDashboardData()
+          if (!active) return
+          setAdmin(user)
+          setQuestions(data.questions)
+          setAnswers(data.answers)
+          setFlags(data.flags)
+          setSummary(data.summary)
+          setMentees(data.mentees)
+          setAssessments(data.assessments)
+          setAuthStatus('authenticated')
+        } catch (error) {
+          if (error.status === 401) {
+            setAuthStatus('unauthenticated')
+            return
+          }
+          throw error
+        }
+      } catch (error) {
+        if (active) {
+          setApiError(error.message)
+          setAuthStatus('unauthenticated')
+        }
+      }
+    }
+    initialize()
+    return () => { active = false }
+  }, [])
+
   const pendingAnswers = answers.filter((answer) => answer.status === 'Needs review').length
-  const unresolvedFlags = flags.filter((flag) => flag.level === 'Review').length
+  const unresolvedFlags = flags.filter((flag) => flag.level !== 'Dismissed').length
   const activeInvites = invitations.filter((invite) => getInvitationState(invite) === 'Active').length
 
-  // Escape closes whichever dialog is open (question modal or answer review)
+  // Escape closes whichever dialog is open.
   useEffect(() => {
     const handleKeyDown = (event) => {
       if (event.key !== 'Escape') return
       setQuestionModalOpen(false)
       setSelectedAnswer(null)
+      setSelectedFlag(null)
     }
     document.addEventListener('keydown', handleKeyDown)
     return () => document.removeEventListener('keydown', handleKeyDown)
@@ -100,10 +164,13 @@ export default function AdminDashboard() {
     setUploadMessage('')
     try {
       const importedQuestions = parseQuestionFile(await file.text())
-      setQuestions((current) => [...importedQuestions, ...current])
+      const response = await apiRequest('/questions/import', { method: 'POST', body: { questions: importedQuestions }, csrfToken })
+      setQuestions((current) => [...response.questions, ...current])
+      setSummary((current) => ({ ...current, totalQuestions: current.totalQuestions + response.questions.length }))
       setUploadMessage(`${importedQuestions.length} question${importedQuestions.length === 1 ? '' : 's'} uploaded successfully.`)
     } catch (error) {
       setUploadError(error instanceof Error ? error.message : 'The question file could not be read.')
+      if (error.status === 401) handleApiError(error)
     } finally {
       event.target.value = ''
     }
@@ -119,29 +186,171 @@ export default function AdminDashboard() {
     URL.revokeObjectURL(url)
   }
 
-  function addQuestion(event) {
+  async function addQuestion(event) {
     event.preventDefault()
     const question = {
-      id: `Q-${Date.now()}`,
       prompt: newQuestion.prompt.trim(),
       options: newQuestion.options.map((option) => option.trim()),
       correctAnswer: newQuestion.correctAnswer.trim(),
-      status: 'Published',
     }
-    setQuestions((current) => [question, ...current])
-    setNewQuestion({ prompt: '', options: ['', '', '', ''], correctAnswer: '' })
-    setQuestionModalOpen(false)
-    setUploadMessage('Question added to the question bank.')
+    setUploadError('')
+    try {
+      const response = await apiRequest('/questions', { method: 'POST', body: question, csrfToken })
+      setQuestions((current) => [response.question, ...current])
+      setSummary((current) => ({ ...current, totalQuestions: current.totalQuestions + 1 }))
+      setNewQuestion({ prompt: '', options: ['', '', '', ''], correctAnswer: '' })
+      setQuestionModalOpen(false)
+      setUploadMessage('Question added to the question bank.')
+    } catch (error) {
+      setUploadError(error.message)
+      if (error.status === 401) handleApiError(error)
+    }
   }
 
-  function markAnswerReviewed(answerId) {
-    setAnswers((current) => current.map((answer) => answer.id === answerId ? { ...answer, status: 'Reviewed' } : answer))
-    setSelectedAnswer(null)
+  function applyDashboardData(data) {
+    setQuestions(data.questions)
+    setAnswers(data.answers)
+    setFlags(data.flags)
+    setSummary(data.summary)
+    setMentees(data.mentees)
+    setAssessments(data.assessments)
   }
 
-  function markFlagReviewed(flagId) {
-    // Reviewing a signal records the admin's review; it does not establish misconduct.
-    setFlags((current) => current.map((flag) => flag.id === flagId ? { ...flag, level: 'Reviewed' } : flag))
+  function handleApiError(error) {
+    if (error.status === 401) {
+      setAdmin(null)
+      setQuestions([])
+      setAnswers([])
+      setFlags([])
+      setAssessments([])
+      setMentees([])
+      setMembers(initialMembers)
+      setInvitations(initialInvitations)
+      setSummary({ totalStudents: 0, totalQuestions: 0, weeklyActivity: [] })
+      setAuthStatus('unauthenticated')
+      clearCsrfTokenCache()
+      requestCsrfToken()
+        .then(({ csrfToken: token }) => setCsrfToken(token))
+        .catch((refreshError) => setApiError(refreshError.message))
+    }
+    setApiError(error.message)
+  }
+
+  async function handleLogin(event) {
+    event.preventDefault()
+    setLoginLoading(true)
+    setLoginError('')
+    setApiError('')
+    try {
+      const { user, csrfToken: token } = await apiRequest('/auth/login', {
+        method: 'POST',
+        body: { email: loginEmail, password: loginPassword },
+        csrfToken,
+      })
+      cacheCsrfToken(token)
+      setCsrfToken(token)
+      setAdmin(user)
+      applyDashboardData(await loadDashboardData())
+      setLoginPassword('')
+      setAuthStatus('authenticated')
+    } catch (error) {
+      setLoginError(error.message)
+    } finally {
+      setLoginLoading(false)
+    }
+  }
+
+  async function handleLogout() {
+    try {
+      await apiRequest('/auth/logout', { method: 'POST', csrfToken })
+      setAdmin(null)
+      setQuestions([])
+      setAnswers([])
+      setFlags([])
+      setAssessments([])
+      setMentees([])
+      setMembers(initialMembers)
+      setInvitations(initialInvitations)
+      setSummary({ totalStudents: 0, totalQuestions: 0, weeklyActivity: [] })
+      setAuthStatus('unauthenticated')
+      clearCsrfTokenCache()
+      const { csrfToken: token } = await requestCsrfToken()
+      setCsrfToken(token)
+    } catch (error) {
+      handleApiError(error)
+    }
+  }
+
+  async function markAnswerReviewed(answerId, decision = 'Approved', feedback = '') {
+    if (decision === 'Revision requested' && !feedback.trim()) {
+      setAnswerReviewError('Add feedback before requesting a revision.')
+      return
+    }
+    try {
+      const response = await apiRequest(`/answers/${encodeURIComponent(answerId)}/review`, {
+        method: 'PATCH',
+        body: { decision, feedback },
+        csrfToken,
+      })
+      setAnswers((current) => current.map((answer) => answer.id === answerId ? response.answer : answer))
+      setSelectedAnswer(null)
+      setAnswerFeedback('')
+      setAnswerReviewError('')
+    } catch (error) {
+      setAnswerReviewError(error.message)
+      if (error.status === 401) handleApiError(error)
+    }
+  }
+
+  function selectFlag(flag) {
+    setSelectedFlag(flag)
+    setFlagReviewNote(flag.reviewNote || '')
+    setFlagReviewError('')
+  }
+
+  async function markFlagReviewed(flagId, decision) {
+    if (!flagReviewNote.trim()) {
+      setFlagReviewError('Add a note to document this review decision.')
+      return
+    }
+    try {
+      const response = await apiRequest(`/flags/${encodeURIComponent(flagId)}/review`, {
+        method: 'PATCH',
+        body: { decision, note: flagReviewNote.trim() },
+        csrfToken,
+      })
+      setFlags((current) => current.map((flag) => flag.id === flagId ? response.flag : flag))
+      setSelectedFlag(null)
+      setFlagReviewNote('')
+      setFlagReviewError('')
+    } catch (error) {
+      setFlagReviewError(error.message)
+      if (error.status === 401) handleApiError(error)
+    }
+  }
+
+  async function createAssessment(input) {
+    try {
+      const response = await apiRequest('/assessments', { method: 'POST', body: input, csrfToken })
+      setAssessments((current) => [response.assessment, ...current])
+    } catch (error) {
+      if (error.status === 401) handleApiError(error)
+      throw error
+    }
+  }
+
+  async function updateAssessmentStatus(assessmentId, status) {
+    try {
+      const response = await apiRequest(`/assessments/${encodeURIComponent(assessmentId)}/status`, {
+        method: 'PATCH',
+        body: { status },
+        csrfToken,
+      })
+      setAssessments((current) => current.map((assessment) => assessment.id === assessmentId ? response.assessment : assessment))
+    } catch (error) {
+      if (error.status === 401) handleApiError(error)
+      throw error
+    }
   }
 
   function updateMemberRole(memberId, role) {
@@ -183,17 +392,22 @@ export default function AdminDashboard() {
     setSearch('')
   }
   const openQuestionModal = () => setQuestionModalOpen(true)
-  const selectAnswer = (answer) => setSelectedAnswer(answer)
+  const selectAnswer = (answer) => {
+    setSelectedAnswer(answer)
+    setAnswerFeedback(answer.feedback || '')
+    setAnswerReviewError('')
+  }
 
   const dashboard = {
-    questions, answers, flags, search,
+    questions, answers, flags, search, summary, assessments, mentees,
     members, invitations,
     answerFilter, setAnswerFilter,
     pendingAnswers, unresolvedFlags, activeInvites,
     navigate, openQuestionModal, selectAnswer,
     downloadTemplate, handleQuestionUpload,
     uploadMessage, uploadError, fileInput,
-    markFlagReviewed,
+    selectFlag, markFlagReviewed, flagReviewNote, setFlagReviewNote, flagReviewError,
+    createAssessment, updateAssessmentStatus,
     updateMemberRole, toggleMemberStatus, removeMember,
     createInvitation, revokeInvitation,
   }
@@ -202,23 +416,27 @@ export default function AdminDashboard() {
   const activeEntry = dashboardViews.find((view) => view.label === activeView) ?? dashboardViews[0]
   const ActiveView = activeEntry.Component
 
+  if (authStatus === 'checking') {
+    return <main className="admin-auth-screen"><div className="admin-auth-card admin-auth-loading"><span className="brand-mark">m</span><strong>Loading Muna workspace…</strong></div></main>
+  }
+
+  if (authStatus !== 'authenticated') {
+    return <AdminLoginScreen email={loginEmail} password={loginPassword} error={loginError || apiError} loading={loginLoading} onEmailChange={setLoginEmail} onPasswordChange={setLoginPassword} onSubmit={handleLogin} />
+  }
+
   return (
     <div className="app-shell">
-      <aside className="sidebar">
-        <a className="brand" href="#/" aria-label="Back to the Muna landing page"><span className="brand-mark">m</span><span>muna<span className="brand-dot">.</span></span></a>
-        <div className="workspace-label">WORKSPACE</div>
-        <nav className="main-nav" aria-label="Main navigation">
-          {dashboardViews.map((item) => <button key={item.label} className={`nav-item ${activeView === item.label ? 'nav-active' : ''}`} onClick={() => navigate(item.label)}><Icon name={item.icon} size={18} /><span>{item.label}</span>{item.badge && badges[item.badge] > 0 && <span className={`nav-badge${item.badge === 'flags' ? ' nav-badge-warm' : ''}`}>{badges[item.badge]}</span>}</button>)}
-        </nav>
-        <div className="sidebar-bottom"><div className="help-card"><span className="help-spark">✦</span><strong>Need a hand?</strong><p>Visit the help center for tips and guides.</p><button onClick={() => setUploadMessage('Help center is not connected in this preview.')}>Open help center <span>→</span></button></div><div className="profile"><span className="profile-avatar">AS</span><span className="profile-text"><strong>Alex Morgan</strong><small>Administrator</small></span><span className="profile-menu">···</span></div></div>
-      </aside>
+      <DashboardSidebar views={dashboardViews} activeView={activeView} badges={badges} admin={admin} onNavigate={navigate} onHelp={() => setApiError('Help center is not configured.')} />
       <main className="main-area">
-        <header className="topbar"><div className="breadcrumb">Workspace <span>/</span> <strong>{activeView}</strong></div><div className="topbar-actions"><label className="search-box"><Icon name="search" size={17} /><input type="search" placeholder="Search anything..." value={search} onChange={(event) => setSearch(event.target.value)} aria-label="Search current view" /><kbd>⌘ K</kbd></label><button className="icon-button notification-button" aria-label="Notifications"><Icon name="bell" size={19} /><span /></button><span className="top-avatar">AM</span></div></header>
+        <DashboardTopbar activeView={activeView} search={search} admin={admin} onSearch={setSearch} onLogout={handleLogout} />
+        <div className="demo-banner" role="status"><Icon name="alert" size={16} /><span><strong>Sample records:</strong> submissions, integrity signals, mentees, members, and invitations are example data. Questions, assessments, and review decisions are saved in SQLite.</span></div>
+        {apiError && <div className="api-error" role="alert"><span>{apiError}</span><button onClick={() => setApiError('')} aria-label="Dismiss error"><Icon name="close" size={15} /></button></div>}
         <div className="content-area"><ActiveView dashboard={dashboard} /></div>
         <footer className="footer"><span>© 2026 Muna learning</span><span>Admin workspace <i /> All systems operational</span></footer>
       </main>
-      {questionModalOpen && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setQuestionModalOpen(false) }}><section className="modal-card" role="dialog" aria-modal="true" aria-labelledby="question-modal-title"><div className="modal-heading"><div><p className="eyebrow">QUESTION BANK</p><h2 id="question-modal-title">Add a question</h2></div><button className="icon-button" onClick={() => setQuestionModalOpen(false)} aria-label="Close"><Icon name="close" /></button></div><form onSubmit={addQuestion}><label className="form-label">Question<textarea required rows="3" value={newQuestion.prompt} onChange={(event) => setNewQuestion({ ...newQuestion, prompt: event.target.value })} placeholder="Write your question..." /></label><div className="option-grid">{newQuestion.options.map((option, index) => <label className="form-label" key={index}>Option {String.fromCharCode(65 + index)}<input required value={option} onChange={(event) => setNewQuestion({ ...newQuestion, options: newQuestion.options.map((value, optionIndex) => optionIndex === index ? event.target.value : value) })} placeholder={`Enter option ${String.fromCharCode(65 + index)}`} /></label>)}</div><label className="form-label">Correct answer<select required value={newQuestion.correctAnswer} onChange={(event) => setNewQuestion({ ...newQuestion, correctAnswer: event.target.value })}><option value="" disabled>Select the correct option</option>{newQuestion.options.map((option, index) => <option key={index} value={option || ''} disabled={!option.trim()}>{String.fromCharCode(65 + index)} — {option || 'Enter an option first'}</option>)}</select></label><div className="modal-actions"><button type="button" className="button button-secondary" onClick={() => setQuestionModalOpen(false)}>Cancel</button><button type="submit" className="button button-primary">Add to question bank</button></div></form></section></div>}
-      {selectedAnswer && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setSelectedAnswer(null) }}><section className="modal-card answer-modal" role="dialog" aria-modal="true" aria-labelledby="answer-modal-title"><div className="modal-heading"><div><p className="eyebrow">SUBMISSION {selectedAnswer.id}</p><h2 id="answer-modal-title">Review answer</h2></div><button className="icon-button" onClick={() => setSelectedAnswer(null)} aria-label="Close"><Icon name="close" /></button></div><StudentCell name={selectedAnswer.student} initials={selectedAnswer.initials} id={selectedAnswer.submitted} /><div className="answer-detail"><span>ASSESSMENT</span><strong>{selectedAnswer.question}</strong></div><div className="answer-detail"><span>STUDENT&apos;S ANSWER</span><p>{selectedAnswer.answer}</p></div><div className="answer-detail answer-score"><span>SCORE</span><strong>{selectedAnswer.score}</strong></div><div className="modal-actions"><button className="button button-secondary" onClick={() => setSelectedAnswer(null)}>Close</button>{selectedAnswer.status === 'Needs review' && <button className="button button-primary" onClick={() => markAnswerReviewed(selectedAnswer.id)}><Icon name="check" size={16} /> Mark as reviewed</button>}</div></section></div>}
+      {questionModalOpen && <QuestionModal question={newQuestion} onQuestionChange={setNewQuestion} error={uploadError} onClose={() => setQuestionModalOpen(false)} onSubmit={addQuestion} />}
+      {selectedAnswer && <AnswerReviewModal answer={selectedAnswer} feedback={answerFeedback} error={answerReviewError} onFeedbackChange={(feedback) => { setAnswerFeedback(feedback); setAnswerReviewError('') }} onClose={() => setSelectedAnswer(null)} onReview={(decision) => markAnswerReviewed(selectedAnswer.id, decision, answerFeedback)} />}
+      {selectedFlag && <FlagReviewModal flag={selectedFlag} note={flagReviewNote} error={flagReviewError} onNoteChange={(note) => { setFlagReviewNote(note); setFlagReviewError('') }} onClose={() => setSelectedFlag(null)} onReview={(decision) => markFlagReviewed(selectedFlag.id, decision)} />}
     </div>
   )
 }

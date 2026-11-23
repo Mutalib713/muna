@@ -2,6 +2,7 @@ import Overview from './Overview'
 import QuestionBank from './QuestionBank'
 import AnswerReview from './AnswerReview'
 import IntegrityFlags from './IntegrityFlags'
+import Assessments from './Assessments'
 import Members from './Members'
 import Invitations from './Invitations'
 
@@ -15,6 +16,7 @@ import Invitations from './Invitations'
 export const dashboardViews = [
   { label: 'Overview', icon: 'grid', Component: Overview },
   { label: 'Question bank', icon: 'book', Component: QuestionBank },
+  { label: 'Assessments', icon: 'file', Component: Assessments },
   { label: 'Answer review', icon: 'check', Component: AnswerReview, badge: 'answers' },
   { label: 'Integrity flags', icon: 'shield', Component: IntegrityFlags, badge: 'flags' },
   { label: 'Members', icon: 'users', Component: Members },
