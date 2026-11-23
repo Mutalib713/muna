@@ -2,6 +2,7 @@ import Overview from './Overview'
 import QuestionBank from './QuestionBank'
 import AnswerReview from './AnswerReview'
 import IntegrityFlags from './IntegrityFlags'
+import Assessments from './Assessments'
 
 // One view = one file. To add a dashboard view:
 //   1. Create the component in src/dashboard/views/
@@ -13,6 +14,7 @@ import IntegrityFlags from './IntegrityFlags'
 export const dashboardViews = [
   { label: 'Overview', icon: 'grid', Component: Overview },
   { label: 'Question bank', icon: 'book', Component: QuestionBank },
+  { label: 'Assessments', icon: 'file', Component: Assessments },
   { label: 'Answer review', icon: 'check', Component: AnswerReview, badge: 'answers' },
   { label: 'Integrity flags', icon: 'shield', Component: IntegrityFlags, badge: 'flags' },
 ]
