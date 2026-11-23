@@ -22,6 +22,7 @@ export default function Navbar({ onOpenModal }) {
         </nav>
 
         <div className="nav-actions">
+          <a className="btn btn-outline" href="/login">Log in</a>
           <button
             type="button"
             className="btn btn-outline"
@@ -29,13 +30,7 @@ export default function Navbar({ onOpenModal }) {
           >
             Enter Code
           </button>
-          <button
-            type="button"
-            className="btn btn-primary"
-            onClick={() => onOpenModal('mentor')}
-          >
-            Mentor Portal
-          </button>
+          <a className="btn btn-primary" href="/signup">Get started</a>
         </div>
       </div>
     </header>

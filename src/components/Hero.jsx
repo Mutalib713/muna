@@ -1,6 +1,6 @@
 import { ArrowRight, Clock, CheckCircle2, Eye, Lock } from '../icons'
 
-export default function Hero({ onOpenModal }) {
+export default function Hero() {
   return (
     <section className="hero-section">
       <div className="content-wrap">
@@ -21,13 +21,9 @@ export default function Hero({ onOpenModal }) {
         </p>
 
         <div className="hero-cta-group">
-          <button
-            type="button"
-            className="btn btn-primary btn-lg"
-            onClick={() => onOpenModal('mentor')}
-          >
+          <a className="btn btn-primary btn-lg" href="/signup">
             Create Organisation Workspace <ArrowRight size={18} />
-          </button>
+          </a>
           <a href="#studio" className="btn btn-outline btn-lg">
             Explore Interactive Types
           </a>
