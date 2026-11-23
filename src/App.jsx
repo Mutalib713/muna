@@ -14,7 +14,7 @@ import {
   HelpCircle,
   FileText,
   Lock
-} from 'lucide-react'
+} from './icons.jsx'
 import './App.css'
 
 export default function App() {
