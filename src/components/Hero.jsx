@@ -2,10 +2,10 @@ import { ArrowRight, Clock, CheckCircle2, Eye, Lock } from '../icons'
 
 export default function Hero({ onOpenModal }) {
   return (
-    <section className="hero-section">
+    <section id="features" className="hero-section">
       <div className="content-wrap">
         <div className="hero-pill">
-          <span className="pill-dot"></span>
+          <span className="pill-dot" aria-hidden="true"></span>
           Muna 1.0 · Research-Backed Exam Delivery
         </div>
 

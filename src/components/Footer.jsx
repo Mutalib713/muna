@@ -19,7 +19,7 @@ export default function Footer() {
 
           <div className="footer-links">
             <div className="footer-col">
-              <h4>Platform</h4>
+              <h3 className="footer-col-title">Platform</h3>
               <ul>
                 <li><a href="#features">Features</a></li>
                 <li><a href="#studio">Question Studio</a></li>
@@ -29,7 +29,7 @@ export default function Footer() {
             </div>
 
             <div className="footer-col">
-              <h4>Architecture</h4>
+              <h3 className="footer-col-title">Architecture</h3>
               <ul>
                 <li><a href="https://github.com/nonydev27/muna" target="_blank" rel="noreferrer">GitHub Repository</a></li>
                 <li><a href="https://github.com/nonydev27/muna/pull/1" target="_blank" rel="noreferrer">PR #1 (PRD Doc)</a></li>

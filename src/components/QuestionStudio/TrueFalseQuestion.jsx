@@ -13,37 +13,42 @@ export default function TrueFalseQuestion() {
         Safe Exam Browser (SEB) operates merely as a standard browser extension and requires no local software installation.
       </div>
 
-      <div className="options-list">
+      <div className="options-list" role="group" aria-label="True or False options">
         {[
           { val: 'true', label: 'True' },
           { val: 'false', label: 'False (Correct: SEB is a dedicated kiosk desktop software)' }
-        ].map((opt) => (
-          <div
-            key={opt.val}
-            className={`option-item ${tfSelection === opt.val ? 'selected' : ''}`}
-            onClick={() => setTfSelection(opt.val)}
-          >
-            <div className="option-marker">
-              {tfSelection === opt.val ? '✓' : ''}
-            </div>
-            <div>{opt.label}</div>
-          </div>
-        ))}
+        ].map((opt) => {
+          const isSelected = tfSelection === opt.val
+          return (
+            <button
+              key={opt.val}
+              type="button"
+              className={`option-item ${isSelected ? 'selected' : ''}`}
+              aria-pressed={isSelected}
+              onClick={() => setTfSelection(opt.val)}
+            >
+              <span className="option-marker" aria-hidden="true">
+                {isSelected ? '✓' : ''}
+              </span>
+              <span>{opt.label}</span>
+            </button>
+          )
+        })}
       </div>
 
-      {tfSelection && (
-        <div style={{ marginTop: '14px', fontSize: '14px' }}>
-          {tfSelection === 'false' ? (
+      <div style={{ marginTop: '14px', fontSize: '14px' }} aria-live="polite">
+        {tfSelection ? (
+          tfSelection === 'false' ? (
             <span style={{ color: 'var(--support)', fontWeight: 600 }}>
               ✓ Correct! Safe Exam Browser is an OS-level kiosk software application, not a browser plugin.
             </span>
           ) : (
-            <span style={{ color: 'var(--accent2)' }}>
+            <span style={{ color: 'var(--accent2-text)' }}>
               Review: Web-only extensions cannot control system shortcuts or display kiosk windows.
             </span>
-          )}
-        </div>
-      )}
+          )
+        ) : null}
+      </div>
     </div>
   )
 }

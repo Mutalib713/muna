@@ -1,6 +1,20 @@
-import { ShieldCheck } from '../icons'
+import { useEffect, useState } from 'react'
+import { ShieldCheck, Menu, X } from '../icons'
 
 export default function Navbar({ onOpenModal }) {
+  const [menuOpen, setMenuOpen] = useState(false)
+  const closeMenu = () => setMenuOpen(false)
+  const toggleMenu = () => setMenuOpen((open) => !open)
+
+  useEffect(() => {
+    if (!menuOpen) return undefined
+    const handleKeyDown = (e) => {
+      if (e.key === 'Escape') closeMenu()
+    }
+    document.addEventListener('keydown', handleKeyDown)
+    return () => document.removeEventListener('keydown', handleKeyDown)
+  }, [menuOpen])
+
   return (
     <header className="navbar">
       <div className="content-wrap nav-content">
@@ -14,7 +28,7 @@ export default function Navbar({ onOpenModal }) {
           </div>
         </div>
 
-        <nav className="nav-links">
+        <nav className="nav-links" aria-label="Primary">
           <a href="#features" className="nav-link">Features</a>
           <a href="#studio" className="nav-link">Question Studio</a>
           <a href="#security" className="nav-link">Security Model</a>
@@ -36,7 +50,26 @@ export default function Navbar({ onOpenModal }) {
           >
             Mentor Portal
           </button>
+          <button
+            type="button"
+            className="nav-menu-btn"
+            aria-expanded={menuOpen}
+            aria-controls="mobile-nav-menu"
+            aria-label={menuOpen ? 'Close navigation menu' : 'Open navigation menu'}
+            onClick={toggleMenu}
+          >
+            {menuOpen ? <X size={20} /> : <Menu size={20} />}
+          </button>
         </div>
+      </div>
+
+      <div id="mobile-nav-menu" className="mobile-menu" hidden={!menuOpen}>
+        <nav className="mobile-menu-links" aria-label="Primary mobile">
+          <a href="#features" onClick={closeMenu}>Features</a>
+          <a href="#studio" onClick={closeMenu}>Question Studio</a>
+          <a href="#security" onClick={closeMenu}>Security Model</a>
+          <a href="#workspaces" onClick={closeMenu}>Workspaces</a>
+        </nav>
       </div>
     </header>
   )

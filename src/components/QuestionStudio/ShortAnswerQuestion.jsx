@@ -2,6 +2,10 @@ import { useState } from 'react'
 
 export default function ShortAnswerQuestion() {
   const [shortAnswer, setShortAnswer] = useState('')
+  const trimmed = shortAnswer.trim()
+  const isMatch =
+    trimmed &&
+    (trimmed.toLowerCase().includes('safe exam') || trimmed.toLowerCase() === 'seb')
 
   return (
     <div>
@@ -14,18 +18,23 @@ export default function ShortAnswerQuestion() {
       </div>
 
       <div className="input-with-button">
+        <label htmlFor="short-answer-input" className="sr-only">
+          Short answer response
+        </label>
         <input
+          id="short-answer-input"
           type="text"
           className="clean-input"
           placeholder="Type your answer here..."
           value={shortAnswer}
           onChange={(e) => setShortAnswer(e.target.value)}
+          autoComplete="off"
         />
       </div>
 
-      {shortAnswer.trim() && (
-        <div style={{ marginTop: '14px', fontSize: '14px' }}>
-          {shortAnswer.toLowerCase().includes('safe exam') || shortAnswer.toLowerCase() === 'seb' ? (
+      <div style={{ marginTop: '14px', fontSize: '14px' }} aria-live="polite">
+        {trimmed ? (
+          isMatch ? (
             <span style={{ color: 'var(--support)', fontWeight: 600 }}>
               ✓ Exact match recognized: Safe Exam Browser (SEB)
             </span>
@@ -33,9 +42,9 @@ export default function ShortAnswerQuestion() {
             <span style={{ color: 'var(--ink2)' }}>
               Typing answer... (Pattern evaluator tests alternative aliases like "SEB")
             </span>
-          )}
-        </div>
-      )}
+          )
+        ) : null}
+      </div>
     </div>
   )
 }
