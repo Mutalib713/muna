@@ -19,30 +19,35 @@ export default function McqQuestion() {
         Which events are reliably captured by the standard W3C Page Visibility API? (Select all that apply)
       </div>
 
-      <div className="options-list">
+      <div className="options-list" role="group" aria-label="Multiple select options">
         {[
           { id: 'tab', text: 'Switching to another browser tab' },
           { id: 'min', text: 'Minimizing the browser window' },
           { id: 'mobile', text: 'Switching applications on a mobile device' },
           { id: 'eye', text: 'Looking away from the physical webcam' }
-        ].map((opt) => (
-          <div
-            key={opt.id}
-            className={`option-item ${selectedMcq.includes(opt.id) ? 'selected' : ''}`}
-            onClick={() => toggleMcq(opt.id)}
-          >
-            <div className="option-marker">
-              {selectedMcq.includes(opt.id) ? '✓' : ''}
-            </div>
-            <div>{opt.text}</div>
-          </div>
-        ))}
+        ].map((opt) => {
+          const isSelected = selectedMcq.includes(opt.id)
+          return (
+            <button
+              key={opt.id}
+              type="button"
+              className={`option-item ${isSelected ? 'selected' : ''}`}
+              aria-pressed={isSelected}
+              onClick={() => toggleMcq(opt.id)}
+            >
+              <span className="option-marker" aria-hidden="true">
+                {isSelected ? '✓' : ''}
+              </span>
+              <span>{opt.text}</span>
+            </button>
+          )
+        })}
       </div>
 
-      <div style={{ marginTop: '16px', fontSize: '13px', color: 'var(--ink2)' }}>
+      <div style={{ marginTop: '16px', fontSize: '13px', color: 'var(--ink2)' }} aria-live="polite">
         Selected: {selectedMcq.length} of 4 options.
         {selectedMcq.includes('eye') && (
-          <span style={{ color: 'var(--accent2)', marginLeft: '8px' }}>
+          <span style={{ color: 'var(--accent2-text)', marginLeft: '8px' }}>
             (Note: Webcam eye tracking is outside MVP scope and not handled by Page Visibility).
           </span>
         )}

@@ -1,76 +1,144 @@
-import { useState, useRef, useEffect } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { Eraser, RotateCcw } from '../../icons'
+
+const PEN_BLUE = '#0F5C8C'
+const PEN_ACCENT = '#D2601A'
+const ERASER_WIDTH = 16
+const DPR_CAP = 2
+
+// Stroke = { color, width, erase, points: [{ x, y }] } with points
+// normalized to 0..1 of the canvas box, so strokes survive resizes.
+function paintStroke(ctx, stroke, w, h) {
+  if (stroke.points.length === 0) return
+  ctx.strokeStyle = stroke.erase ? '#FFFFFF' : stroke.color
+  ctx.lineWidth = stroke.erase ? ERASER_WIDTH : stroke.width
+  ctx.beginPath()
+  const first = stroke.points[0]
+  ctx.moveTo(first.x * w, first.y * h)
+  if (stroke.points.length === 1) {
+    // A tap: draw a small dot so single clicks leave a mark
+    ctx.lineTo(first.x * w + 0.01, first.y * h + 0.01)
+  } else {
+    for (let i = 1; i < stroke.points.length; i++) {
+      ctx.lineTo(stroke.points[i].x * w, stroke.points[i].y * h)
+    }
+  }
+  ctx.stroke()
+}
 
 export default function CanvasQuestion() {
   const canvasRef = useRef(null)
-  const [isDrawing, setIsDrawing] = useState(false)
-  const [penColor, setPenColor] = useState('#0F5C8C')
-  const [lineWidth, setLineWidth] = useState(3)
-  const [isEraser, setIsEraser] = useState(false)
+  const strokesRef = useRef([]) // committed vector strokes
+  const currentStrokeRef = useRef(null) // stroke in progress
+  const metricsRef = useRef({ w: 0, h: 0 })
   const [strokeCount, setStrokeCount] = useState(0)
+  const [penColor, setPenColor] = useState(PEN_BLUE)
+  const [lineWidth, setLineWidth] = useState(2)
+  const [isEraser, setIsEraser] = useState(false)
+
+  const redraw = useCallback(() => {
+    const canvas = canvasRef.current
+    const { w, h } = metricsRef.current
+    if (!canvas || w === 0 || h === 0) return
+    const ctx = canvas.getContext('2d')
+    ctx.save()
+    ctx.setTransform(1, 0, 0, 1, 0, 0)
+    ctx.clearRect(0, 0, canvas.width, canvas.height)
+    ctx.restore()
+    for (const stroke of strokesRef.current) {
+      paintStroke(ctx, stroke, w, h)
+    }
+    if (currentStrokeRef.current) {
+      paintStroke(ctx, currentStrokeRef.current, w, h)
+    }
+  }, [])
+
+  const sizeCanvas = useCallback(() => {
+    const canvas = canvasRef.current
+    if (!canvas) return
+    const rect = canvas.getBoundingClientRect()
+    // Hidden (display:none) reports 0x0: keep the current bitmap and
+    // vector data, we re-size on the next visible resize callback.
+    if (rect.width < 10 || rect.height < 10) return
+    const dpr = Math.min(window.devicePixelRatio || 1, DPR_CAP)
+    metricsRef.current = { w: rect.width, h: rect.height }
+    canvas.width = Math.round(rect.width * dpr)
+    canvas.height = Math.round(rect.height * dpr)
+    const ctx = canvas.getContext('2d')
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
+    ctx.lineCap = 'round'
+    ctx.lineJoin = 'round'
+    redraw()
+  }, [redraw])
 
   useEffect(() => {
     const canvas = canvasRef.current
-    if (!canvas) return
-    const ctx = canvas.getContext('2d')
-    ctx.lineCap = 'round'
-    ctx.lineJoin = 'round'
+    if (!canvas) return undefined
+    sizeCanvas()
+    const observer = new ResizeObserver(sizeCanvas)
+    observer.observe(canvas)
+    return () => observer.disconnect()
+  }, [sizeCanvas])
 
-    const rect = canvas.getBoundingClientRect()
-    canvas.width = rect.width * 2
-    canvas.height = rect.height * 2
-    ctx.scale(2, 2)
-    ctx.strokeStyle = isEraser ? '#FFFFFF' : penColor
-    ctx.lineWidth = isEraser ? 16 : lineWidth
-  }, [penColor, lineWidth, isEraser])
-
-  const startDrawing = (e) => {
-    const canvas = canvasRef.current
-    if (!canvas) return
-    const ctx = canvas.getContext('2d')
-    const rect = canvas.getBoundingClientRect()
-    const clientX = e.clientX || (e.touches && e.touches[0].clientX)
-    const clientY = e.clientY || (e.touches && e.touches[0].clientY)
-
-    const x = clientX - rect.left
-    const y = clientY - rect.top
-
-    ctx.beginPath()
-    ctx.moveTo(x, y)
-    setIsDrawing(true)
-  }
-
-  const draw = (e) => {
-    if (!isDrawing) return
-    const canvas = canvasRef.current
-    if (!canvas) return
-    const ctx = canvas.getContext('2d')
-    const rect = canvas.getBoundingClientRect()
-    const clientX = e.clientX || (e.touches && e.touches[0].clientX)
-    const clientY = e.clientY || (e.touches && e.touches[0].clientY)
-
-    const x = clientX - rect.left
-    const y = clientY - rect.top
-
-    ctx.strokeStyle = isEraser ? '#FFFFFF' : penColor
-    ctx.lineWidth = isEraser ? 16 : lineWidth
-    ctx.lineTo(x, y)
-    ctx.stroke()
-  }
-
-  const stopDrawing = () => {
-    if (isDrawing) {
-      setIsDrawing(false)
-      setStrokeCount((prev) => prev + 1)
+  const getPoint = (e) => {
+    const rect = canvasRef.current.getBoundingClientRect()
+    return {
+      x: (e.clientX - rect.left) / rect.width,
+      y: (e.clientY - rect.top) / rect.height,
     }
   }
 
-  const clearCanvas = () => {
+  const handlePointerDown = (e) => {
+    if (e.pointerType === 'mouse' && e.button !== 0) return
     const canvas = canvasRef.current
-    if (!canvas) return
+    try {
+      canvas.setPointerCapture(e.pointerId)
+    } catch {
+      // Pointer capture is best-effort: lost or synthetic pointers
+      // still draw, they just don't track outside the canvas bounds.
+    }
+    currentStrokeRef.current = {
+      color: penColor,
+      width: lineWidth,
+      erase: isEraser,
+      points: [getPoint(e)],
+    }
+    const { w, h } = metricsRef.current
     const ctx = canvas.getContext('2d')
-    ctx.clearRect(0, 0, canvas.width, canvas.height)
+    paintStroke(ctx, currentStrokeRef.current, w, h)
+  }
+
+  const handlePointerMove = (e) => {
+    const stroke = currentStrokeRef.current
+    if (!stroke) return
+    const point = getPoint(e)
+    const prev = stroke.points[stroke.points.length - 1]
+    // Skip near-duplicate points so the vector data stays compact
+    if (Math.abs(point.x - prev.x) < 0.001 && Math.abs(point.y - prev.y) < 0.001) return
+    stroke.points.push(point)
+    const { w, h } = metricsRef.current
+    const ctx = canvasRef.current.getContext('2d')
+    ctx.strokeStyle = stroke.erase ? '#FFFFFF' : stroke.color
+    ctx.lineWidth = stroke.erase ? ERASER_WIDTH : stroke.width
+    ctx.beginPath()
+    ctx.moveTo(prev.x * w, prev.y * h)
+    ctx.lineTo(point.x * w, point.y * h)
+    ctx.stroke()
+  }
+
+  const endStroke = () => {
+    const stroke = currentStrokeRef.current
+    if (!stroke) return
+    strokesRef.current.push(stroke)
+    currentStrokeRef.current = null
+    setStrokeCount(strokesRef.current.length)
+  }
+
+  const clearCanvas = () => {
+    strokesRef.current = []
+    currentStrokeRef.current = null
     setStrokeCount(0)
+    redraw()
   }
 
   return (
@@ -87,7 +155,7 @@ export default function CanvasQuestion() {
       </div>
 
       <div className="q-prompt">
-        Draw an architectural state machine diagram showing an assessment attempt moving from 
+        Draw an architectural state machine diagram showing an assessment attempt moving from
         <strong> Active</strong> to <strong> Submitted</strong> or <strong> Terminated</strong>.
       </div>
 
@@ -96,27 +164,30 @@ export default function CanvasQuestion() {
           <div className="tool-group">
             <button
               type="button"
-              className={`tool-btn ${!isEraser && penColor === '#0F5C8C' ? 'active' : ''}`}
+              className={`tool-btn ${!isEraser && penColor === PEN_BLUE ? 'active' : ''}`}
+              aria-pressed={!isEraser && penColor === PEN_BLUE}
               onClick={() => {
                 setIsEraser(false)
-                setPenColor('#0F5C8C')
+                setPenColor(PEN_BLUE)
               }}
             >
-              <span style={{ width: 10, height: 10, borderRadius: '50%', background: '#0F5C8C' }}></span> Blue Pen
+              <span style={{ width: 10, height: 10, borderRadius: '50%', background: PEN_BLUE, display: 'inline-block' }} aria-hidden="true"></span> Blue Pen
             </button>
             <button
               type="button"
-              className={`tool-btn ${!isEraser && penColor === '#D2601A' ? 'active' : ''}`}
+              className={`tool-btn ${!isEraser && penColor === PEN_ACCENT ? 'active' : ''}`}
+              aria-pressed={!isEraser && penColor === PEN_ACCENT}
               onClick={() => {
                 setIsEraser(false)
-                setPenColor('#D2601A')
+                setPenColor(PEN_ACCENT)
               }}
             >
-              <span style={{ width: 10, height: 10, borderRadius: '50%', background: '#D2601A' }}></span> Accent Pen
+              <span style={{ width: 10, height: 10, borderRadius: '50%', background: PEN_ACCENT, display: 'inline-block' }} aria-hidden="true"></span> Accent Pen
             </button>
             <button
               type="button"
               className={`tool-btn ${isEraser ? 'active' : ''}`}
+              aria-pressed={isEraser}
               onClick={() => setIsEraser(true)}
             >
               <Eraser size={14} /> Eraser
@@ -127,6 +198,7 @@ export default function CanvasQuestion() {
             <button
               type="button"
               className={`tool-btn ${!isEraser && lineWidth === 2 ? 'active' : ''}`}
+              aria-pressed={!isEraser && lineWidth === 2}
               onClick={() => {
                 setIsEraser(false)
                 setLineWidth(2)
@@ -137,6 +209,7 @@ export default function CanvasQuestion() {
             <button
               type="button"
               className={`tool-btn ${!isEraser && lineWidth === 4 ? 'active' : ''}`}
+              aria-pressed={!isEraser && lineWidth === 4}
               onClick={() => {
                 setIsEraser(false)
                 setLineWidth(4)
@@ -156,18 +229,17 @@ export default function CanvasQuestion() {
         <canvas
           ref={canvasRef}
           className="canvas-area"
-          onMouseDown={startDrawing}
-          onMouseMove={draw}
-          onMouseUp={stopDrawing}
-          onMouseLeave={stopDrawing}
-          onTouchStart={startDrawing}
-          onTouchMove={draw}
-          onTouchEnd={stopDrawing}
+          role="img"
+          aria-label="Freehand drawing canvas, draw with mouse, touch or stylus"
+          onPointerDown={handlePointerDown}
+          onPointerMove={handlePointerMove}
+          onPointerUp={endStroke}
+          onPointerCancel={endStroke}
         />
 
         <div className="canvas-hint">
-          <span>Draw on the canvas above using touch or mouse.</span>
-          <span>Muna records strokes as vector data for mentor annotations.</span>
+          <span>Draw on the canvas above using touch, stylus or mouse.</span>
+          <span>Strokes are stored as vector data and survive tool switches and resizes.</span>
         </div>
       </div>
     </div>

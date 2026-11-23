@@ -1,8 +1,64 @@
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
+import { X } from '../icons'
+
+const FOCUSABLE_SELECTOR = 'button, input, textarea, select, a[href], [tabindex]:not([tabindex="-1"])'
 
 export default function ActionModal({ isOpen, onClose, modalType }) {
+  const dialogRef = useRef(null)
+  const restoreFocusRef = useRef(null)
   const [modalCode, setModalCode] = useState('')
   const [modalStatus, setModalStatus] = useState(null)
+
+  // Remember focus origin and restore it when the dialog closes.
+  useEffect(() => {
+    if (!isOpen) return undefined
+    restoreFocusRef.current = document.activeElement
+    return () => {
+      const el = restoreFocusRef.current
+      if (el && typeof el.focus === 'function') {
+        el.focus()
+      }
+    }
+  }, [isOpen])
+
+  // Initial focus, Escape to close, Tab focus trap.
+  useEffect(() => {
+    if (!isOpen) return undefined
+    const dialog = dialogRef.current
+    if (dialog) {
+      dialog.focus()
+      const firstInput = dialog.querySelector('input')
+      if (firstInput) firstInput.focus()
+    }
+
+    const handleKeyDown = (e) => {
+      if (e.key === 'Escape') {
+        e.preventDefault()
+        onClose()
+        return
+      }
+      if (e.key !== 'Tab') return
+      const dialogEl = dialogRef.current
+      if (!dialogEl) return
+      const focusables = [...dialogEl.querySelectorAll(FOCUSABLE_SELECTOR)].filter(
+        (el) => !el.disabled && el.offsetParent !== null
+      )
+      if (focusables.length === 0) return
+      const first = focusables[0]
+      const last = focusables[focusables.length - 1]
+      const active = document.activeElement
+      if (e.shiftKey && (active === first || active === dialogEl)) {
+        e.preventDefault()
+        last.focus()
+      } else if (!e.shiftKey && active === last) {
+        e.preventDefault()
+        first.focus()
+      }
+    }
+
+    document.addEventListener('keydown', handleKeyDown)
+    return () => document.removeEventListener('keydown', handleKeyDown)
+  }, [isOpen, modalType, onClose])
 
   if (!isOpen) return null
 
@@ -38,7 +94,13 @@ export default function ActionModal({ isOpen, onClose, modalType }) {
       onClick={onClose}
     >
       <div
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="modal-heading"
+        tabIndex={-1}
         style={{
+          position: 'relative',
           background: '#ffffff',
           borderRadius: '16px',
           maxWidth: '480px',
@@ -48,30 +110,59 @@ export default function ActionModal({ isOpen, onClose, modalType }) {
         }}
         onClick={(e) => e.stopPropagation()}
       >
+        <button
+          type="button"
+          aria-label="Close dialog"
+          onClick={onClose}
+          style={{
+            position: 'absolute',
+            top: '14px',
+            right: '14px',
+            width: '34px',
+            height: '34px',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            borderRadius: '6px',
+            color: 'var(--ink2)',
+            border: '1px solid var(--rule)',
+            background: 'var(--surface)'
+          }}
+        >
+          <X size={18} />
+        </button>
+
         {modalType === 'join' ? (
           <>
-            <h3 style={{ fontSize: '20px', fontWeight: 700, marginBottom: '8px' }}>
+            <h3 id="modal-heading" style={{ fontSize: '20px', fontWeight: 700, marginBottom: '8px' }}>
               Enter Organisation Join Code
             </h3>
             <p style={{ fontSize: '14px', color: 'var(--ink2)', marginBottom: '20px' }}>
               Paste the unique invitation token or code provided by your mentor.
             </p>
             <form onSubmit={handleModalSubmit}>
+              <label htmlFor="modal-join-code" className="sr-only">
+                Organisation invitation code
+              </label>
               <input
+                id="modal-join-code"
                 type="text"
                 className="clean-input"
                 style={{ width: '100%', marginBottom: '16px' }}
                 placeholder="e.g. BRIGHT-MINDS-2026"
                 value={modalCode}
                 onChange={(e) => setModalCode(e.target.value)}
-                autoFocus
+                autoComplete="off"
               />
               {modalStatus && (
-                <div style={{
-                  marginBottom: '16px',
-                  fontSize: '13px',
-                  color: modalStatus.valid ? 'var(--support)' : 'var(--danger)'
-                }}>
+                <div
+                  aria-live="polite"
+                  style={{
+                    marginBottom: '16px',
+                    fontSize: '13px',
+                    color: modalStatus.valid ? 'var(--support)' : 'var(--accent2-text)'
+                  }}
+                >
                   {modalStatus.message}
                 </div>
               )}
@@ -84,21 +175,21 @@ export default function ActionModal({ isOpen, onClose, modalType }) {
                   Close
                 </button>
                 <button type="submit" className="btn btn-primary">
-                  Verify & Join
+                  Verify &amp; Join
                 </button>
               </div>
             </form>
           </>
         ) : (
           <>
-            <h3 style={{ fontSize: '20px', fontWeight: 700, marginBottom: '8px' }}>
+            <h3 id="modal-heading" style={{ fontSize: '20px', fontWeight: 700, marginBottom: '8px' }}>
               Mentor Workspace Login
             </h3>
             <p style={{ fontSize: '14px', color: 'var(--ink2)', marginBottom: '20px' }}>
               Organisation admins and mentors manage assessments, question banks, and grading rubrics.
             </p>
             <div style={{ background: 'var(--field2)', padding: '16px', borderRadius: '8px', fontSize: '13px', color: 'var(--ink2)', marginBottom: '20px' }}>
-              <strong>Phase 0 & 1 Status:</strong> Database authentication is being configured. You can test question authoring in the <strong>Question Studio</strong> section right on this page!
+              <strong>Phase 0 &amp; 1 Status:</strong> Database authentication is being configured. You can test question authoring in the <strong>Question Studio</strong> section right on this page!
             </div>
             <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '10px' }}>
               <button
