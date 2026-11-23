@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { initialQuestions, initialAnswers, initialFlags } from './dashboardData'
+import { initialQuestions, initialAnswers, initialFlags, initialMembers, initialInvitations, getInvitationState } from './dashboardData'
 import { dashboardViews } from './views/registry'
 import Icon from './DashboardIcon'
 import StudentCell from './components/StudentCell'
@@ -12,6 +12,8 @@ import './Dashboard.css'
 // CONTEXT CONTRACT: every view in views/registry.js receives a single
 // `dashboard` prop — the object built in this component. Fields:
 //   questions, answers, flags          demo records (dashboardData.js)
+//   members, invitations               org records (dashboardData.js)
+//   activeInvites                      count of Active invitations
 //   search                             topbar search string
 //   answerFilter, setAnswerFilter      Answer review filter state
 //   pendingAnswers, unresolvedFlags    derived counts for headers/badges
@@ -23,6 +25,12 @@ import './Dashboard.css'
 //   uploadMessage, uploadError         upload feedback strings
 //   fileInput                          ref to the hidden file input
 //   markFlagReviewed(flagId)           mark an integrity flag reviewed
+//   updateMemberRole(id, role)         change a member's organisation role
+//   toggleMemberStatus(id)             suspend / restore a member
+//   removeMember(id)                   remove a member from the organisation
+//   createInvitation({type, email, role, days, maxUses})
+//                                      create an invitation, returns it
+//   revokeInvitation(id)               revoke an outstanding invitation
 //
 // Demo data lives in dashboardData.js until Phase 0/1 wires a real backend.
 export default function AdminDashboard() {
@@ -30,6 +38,8 @@ export default function AdminDashboard() {
   const [questions, setQuestions] = useState(initialQuestions)
   const [answers, setAnswers] = useState(initialAnswers)
   const [flags, setFlags] = useState(initialFlags)
+  const [members, setMembers] = useState(initialMembers)
+  const [invitations, setInvitations] = useState(initialInvitations)
   const [search, setSearch] = useState('')
   const [answerFilter, setAnswerFilter] = useState('All submissions')
   const [selectedAnswer, setSelectedAnswer] = useState(null)
@@ -41,6 +51,7 @@ export default function AdminDashboard() {
 
   const pendingAnswers = answers.filter((answer) => answer.status === 'Needs review').length
   const unresolvedFlags = flags.filter((flag) => flag.level === 'Review').length
+  const activeInvites = invitations.filter((invite) => getInvitationState(invite) === 'Active').length
 
   // Escape closes whichever dialog is open (question modal or answer review)
   useEffect(() => {
@@ -133,6 +144,40 @@ export default function AdminDashboard() {
     setFlags((current) => current.map((flag) => flag.id === flagId ? { ...flag, level: 'Reviewed' } : flag))
   }
 
+  function updateMemberRole(memberId, role) {
+    setMembers((current) => current.map((member) => member.id === memberId ? { ...member, role } : member))
+  }
+
+  function toggleMemberStatus(memberId) {
+    setMembers((current) => current.map((member) => member.id === memberId ? { ...member, status: member.status === 'Active' ? 'Suspended' : 'Active' } : member))
+  }
+
+  function removeMember(memberId) {
+    setMembers((current) => current.filter((member) => member.id !== memberId))
+  }
+
+  function createInvitation({ type, email, role, days, maxUses }) {
+    const now = new Date()
+    const code = `INV-${Math.random().toString(36).slice(2, 8).toUpperCase()}`
+    const invite = {
+      id: code,
+      type,
+      email: type === 'email' ? email.trim() : null,
+      role,
+      created: 'Just now',
+      expires: new Date(now.getTime() + days * 86400000).toISOString().slice(0, 10),
+      maxUses: type === 'email' ? 1 : Math.max(1, Number(maxUses) || 1),
+      uses: 0,
+      revoked: false,
+    }
+    setInvitations((current) => [invite, ...current])
+    return invite
+  }
+
+  function revokeInvitation(invitationId) {
+    setInvitations((current) => current.map((invite) => invite.id === invitationId ? { ...invite, revoked: true } : invite))
+  }
+
   const navigate = (label) => {
     setActiveView(label)
     setSearch('')
@@ -142,15 +187,18 @@ export default function AdminDashboard() {
 
   const dashboard = {
     questions, answers, flags, search,
+    members, invitations,
     answerFilter, setAnswerFilter,
-    pendingAnswers, unresolvedFlags,
+    pendingAnswers, unresolvedFlags, activeInvites,
     navigate, openQuestionModal, selectAnswer,
     downloadTemplate, handleQuestionUpload,
     uploadMessage, uploadError, fileInput,
     markFlagReviewed,
+    updateMemberRole, toggleMemberStatus, removeMember,
+    createInvitation, revokeInvitation,
   }
 
-  const badges = { answers: pendingAnswers, flags: unresolvedFlags }
+  const badges = { answers: pendingAnswers, flags: unresolvedFlags, invites: activeInvites }
   const activeEntry = dashboardViews.find((view) => view.label === activeView) ?? dashboardViews[0]
   const ActiveView = activeEntry.Component
 
