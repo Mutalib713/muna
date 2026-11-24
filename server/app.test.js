@@ -66,20 +66,25 @@ test('admin APIs require a session and persist questions, assessments, and revie
 
   const mentees = await client.get('/api/mentees')
   assert.equal(mentees.status, 200)
-  assert.equal(mentees.body.mentees.length, 5)
+  assert.equal(mentees.body.mentees.length, 0)
+
+  const mentee = await client.post('/api/mentees')
+    .set('X-CSRF-Token', csrfToken)
+    .send({ name: 'Amara Okafor', email: 'amara@example.test' })
+  assert.equal(mentee.status, 201)
 
   const assessment = await client.post('/api/assessments')
     .set('X-CSRF-Token', csrfToken)
-    .send({ title: 'Algebra check-in', questionIds: ['Q-104'], menteeIds: ['M-001'] })
+    .send({ title: 'Algebra check-in', questionIds: ['Q-104'], menteeIds: [mentee.body.mentee.id] })
   assert.equal(assessment.status, 201)
   assert.equal(assessment.body.assessment.maxAttempts, 3)
   assert.equal(assessment.body.assessment.status, 'Draft')
   assert.deepEqual(assessment.body.assessment.questionIds, ['Q-104'])
-  assert.deepEqual(assessment.body.assessment.menteeIds, ['M-001'])
+  assert.deepEqual(assessment.body.assessment.menteeIds, [mentee.body.mentee.id])
 
   const invalidAttemptLimit = await client.post('/api/assessments')
     .set('X-CSRF-Token', csrfToken)
-    .send({ title: 'Invalid assessment', questionIds: ['Q-104'], menteeIds: ['M-001'], maxAttempts: 4 })
+    .send({ title: 'Invalid assessment', questionIds: ['Q-104'], menteeIds: [mentee.body.mentee.id], maxAttempts: 4 })
   assert.equal(invalidAttemptLimit.status, 400)
 
   const publishAssessment = await client.patch(`/api/assessments/${assessment.body.assessment.id}/status`)
@@ -87,6 +92,10 @@ test('admin APIs require a session and persist questions, assessments, and revie
     .send({ status: 'Published' })
   assert.equal(publishAssessment.status, 200)
   assert.equal(publishAssessment.body.assessment.status, 'Published')
+
+  const learnerAttempt = await client.post(`/api/learner/assessments/${assessment.body.assessment.id}/attempts`)
+    .send({ menteeId: mentee.body.mentee.id, answers: { 'Q-104': 'Photosynthesis' } })
+  assert.equal(learnerAttempt.status, 201)
 
   const pauseAssessment = await client.patch(`/api/assessments/${assessment.body.assessment.id}/status`)
     .set('X-CSRF-Token', csrfToken)
@@ -99,16 +108,25 @@ test('admin APIs require a session and persist questions, assessments, and revie
     .send({ prompt: 'Invalid key', options: ['A', 'B'], correctAnswer: 'C' })
   assert.equal(invalidQuestion.status, 400)
 
-  const review = await client.patch('/api/answers/A-2381/review')
+  const submissions = await client.get('/api/answers')
+  assert.equal(submissions.status, 200)
+  assert.equal(submissions.body.answers.length, 1)
+  const submissionId = submissions.body.answers[0].id
+
+  const review = await client.patch(`/api/answers/${submissionId}/review`)
     .set('X-CSRF-Token', csrfToken)
     .send({ decision: 'Revision requested', feedback: 'Please show your working.' })
   assert.equal(review.status, 200)
   assert.equal(review.body.answer.reviewDecision, 'Revision requested')
   assert.equal(review.body.answer.reviewHistory.length, 1)
   const persistedAnswer = await client.get('/api/answers')
-  assert.equal(persistedAnswer.body.answers.find((answer) => answer.id === 'A-2381').feedback, 'Please show your working.')
+  assert.equal(persistedAnswer.body.answers.find((answer) => answer.id === submissionId).feedback, 'Please show your working.')
 
-  const flagReview = await client.patch('/api/flags/F-021/review')
+  const createdFlag = await client.post('/api/flags')
+    .set('X-CSRF-Token', csrfToken)
+    .send({ student: 'Amara Okafor', assessment: 'Algebra check-in', signal: 'Repeated answer pattern', detail: 'Needs contextual review.' })
+  assert.equal(createdFlag.status, 201)
+  const flagReview = await client.patch(`/api/flags/${createdFlag.body.flag.id}/review`)
     .set('X-CSRF-Token', csrfToken)
     .send({ decision: 'Follow-up', note: 'Check the submission context with the student.' })
   assert.equal(flagReview.status, 200)

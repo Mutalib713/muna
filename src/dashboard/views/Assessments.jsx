@@ -16,11 +16,12 @@ function newAssessmentForm() {
 }
 
 export default function Assessments({ dashboard }) {
-  const { questions, assessments, mentees, search, createAssessment: saveAssessment, updateAssessmentStatus } = dashboard
+  const { questions, assessments, mentees, search, createAssessment: saveAssessment, updateAssessment: saveAssessmentChanges, deleteAssessment, updateAssessmentStatus } = dashboard
   const [modalOpen, setModalOpen] = useState(false)
   const [form, setForm] = useState(newAssessmentForm)
   const [formError, setFormError] = useState('')
   const [viewError, setViewError] = useState('')
+  const [editingAssessmentId, setEditingAssessmentId] = useState(null)
 
   const filteredAssessments = useMemo(() => {
     const query = search.trim().toLowerCase()
@@ -62,15 +63,18 @@ export default function Assessments({ dashboard }) {
     }
 
     try {
-      await saveAssessment({
-      title: form.title.trim(),
-      description: form.description.trim(),
-      questionIds: [...form.questionIds],
-      menteeIds: [...form.menteeIds],
-      maxAttempts: Number(form.maxAttempts),
-      })
+      const input = {
+        title: form.title.trim(),
+        description: form.description.trim(),
+        questionIds: [...form.questionIds],
+        menteeIds: [...form.menteeIds],
+        maxAttempts: Number(form.maxAttempts),
+      }
+      if (editingAssessmentId) await saveAssessmentChanges(editingAssessmentId, input)
+      else await saveAssessment(input)
       setForm(newAssessmentForm())
       setFormError('')
+      setEditingAssessmentId(null)
       setModalOpen(false)
     } catch (error) {
       setFormError(error.message)
@@ -91,6 +95,30 @@ export default function Assessments({ dashboard }) {
     setModalOpen(false)
     setForm(newAssessmentForm())
     setFormError('')
+    setEditingAssessmentId(null)
+  }
+
+  function editAssessment(assessment) {
+    setEditingAssessmentId(assessment.id)
+    setForm({
+      title: assessment.title,
+      description: assessment.description,
+      questionIds: [...assessment.questionIds],
+      menteeIds: [...assessment.menteeIds],
+      maxAttempts: String(assessment.maxAttempts),
+    })
+    setFormError('')
+    setModalOpen(true)
+  }
+
+  async function removeAssessment(assessment) {
+    if (!window.confirm(`Delete draft "${assessment.title}"?`)) return
+    setViewError('')
+    try {
+      await deleteAssessment(assessment.id)
+    } catch (error) {
+      setViewError(error.message)
+    }
   }
 
   return (
@@ -153,7 +181,7 @@ export default function Assessments({ dashboard }) {
                 </div>
                 <div className="assessment-actions">
                   {assessment.status === 'Draft'
-                    ? <button className="button button-primary assessment-action-button" onClick={() => togglePublishedState(assessment)}>Publish</button>
+                    ? <><button className="small-button" onClick={() => editAssessment(assessment)}>Edit</button><button className="small-button" onClick={() => removeAssessment(assessment)}>Delete</button><button className="button button-primary assessment-action-button" onClick={() => togglePublishedState(assessment)}>Publish</button></>
                     : <button className="button button-secondary assessment-action-button" onClick={() => togglePublishedState(assessment)}>{assessment.status === 'Published' ? 'Pause' : 'Resume'}</button>}
                 </div>
               </article>
@@ -172,7 +200,7 @@ export default function Assessments({ dashboard }) {
       {modalOpen && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) closeModal() }}>
         <section className="modal-card assessment-modal" role="dialog" aria-modal="true" aria-labelledby="create-assessment-title">
           <div className="modal-heading">
-            <div><p className="eyebrow">ASSESSMENT BUILDER</p><h2 id="create-assessment-title">Create assessment</h2></div>
+            <div><p className="eyebrow">ASSESSMENT BUILDER</p><h2 id="create-assessment-title">{editingAssessmentId ? 'Edit draft' : 'Create assessment'}</h2></div>
             <button className="icon-button" onClick={closeModal} aria-label="Close">×</button>
           </div>
           <form onSubmit={createAssessment}>
@@ -189,7 +217,7 @@ export default function Assessments({ dashboard }) {
             </fieldset>
             <p className="assessment-draft-note">This creates a draft. Review the selected questions and mentees, then publish it to make it available.</p>
             {formError && <p className="inline-message error-message" role="alert">{formError}</p>}
-            <div className="modal-actions"><button type="button" className="button button-secondary" onClick={closeModal}>Cancel</button><button type="submit" className="button button-primary">Create draft</button></div>
+            <div className="modal-actions"><button type="button" className="button button-secondary" onClick={closeModal}>Cancel</button><button type="submit" className="button button-primary">{editingAssessmentId ? 'Save draft' : 'Create draft'}</button></div>
           </form>
         </section>
       </div>}

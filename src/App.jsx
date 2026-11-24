@@ -8,6 +8,7 @@ import JoinBanner from './components/JoinBanner'
 import Footer from './components/Footer'
 import ActionModal from './components/ActionModal'
 import AdminDashboard from './dashboard/AdminDashboard'
+import LearnerAssessment from './LearnerAssessment'
 import './App.css'
 
 // Minimal hash routing: #/dashboard opens the admin workspace, everything
@@ -39,6 +40,9 @@ export default function App() {
 
   if (hash.startsWith('#/dashboard')) {
     return <AdminDashboard />
+  }
+  if (hash.startsWith('#/learner')) {
+    return <LearnerAssessment hash={hash} />
   }
 
   return (

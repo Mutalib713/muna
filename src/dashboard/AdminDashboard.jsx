@@ -7,6 +7,7 @@ import DashboardSidebar from './components/DashboardSidebar'
 import DashboardTopbar from './components/DashboardTopbar'
 import FlagReviewModal from './components/FlagReviewModal'
 import QuestionModal from './components/QuestionModal'
+import HelpCenterModal from './components/HelpCenterModal'
 import apiRequest, { cacheCsrfToken, clearCsrfTokenCache, loadDashboardData, requestCsrfToken } from './services/adminApi'
 import './Dashboard.css'
 
@@ -43,6 +44,8 @@ export default function AdminDashboard() {
   const [uploadMessage, setUploadMessage] = useState('')
   const [uploadError, setUploadError] = useState('')
   const [newQuestion, setNewQuestion] = useState({ prompt: '', options: ['', '', '', ''], correctAnswer: '' })
+  const [editingQuestionId, setEditingQuestionId] = useState(null)
+  const [helpOpen, setHelpOpen] = useState(false)
   const fileInput = useRef(null)
 
   useEffect(() => {
@@ -92,6 +95,7 @@ export default function AdminDashboard() {
       setQuestionModalOpen(false)
       setSelectedAnswer(null)
       setSelectedFlag(null)
+      setHelpOpen(false)
     }
     document.addEventListener('keydown', handleKeyDown)
     return () => document.removeEventListener('keydown', handleKeyDown)
@@ -164,12 +168,41 @@ export default function AdminDashboard() {
     }
     setUploadError('')
     try {
-      const response = await apiRequest('/questions', { method: 'POST', body: question, csrfToken })
-      setQuestions((current) => [response.question, ...current])
-      setSummary((current) => ({ ...current, totalQuestions: current.totalQuestions + 1 }))
+      const response = editingQuestionId
+        ? await apiRequest(`/questions/${encodeURIComponent(editingQuestionId)}`, { method: 'PATCH', body: question, csrfToken })
+        : await apiRequest('/questions', { method: 'POST', body: question, csrfToken })
+      setQuestions((current) => editingQuestionId
+        ? current.map((item) => item.id === editingQuestionId ? response.question : item)
+        : [response.question, ...current])
+      if (!editingQuestionId) setSummary((current) => ({ ...current, totalQuestions: current.totalQuestions + 1 }))
       setNewQuestion({ prompt: '', options: ['', '', '', ''], correctAnswer: '' })
+      setEditingQuestionId(null)
       setQuestionModalOpen(false)
-      setUploadMessage('Question added to the question bank.')
+      setUploadMessage(editingQuestionId ? 'Question updated.' : 'Question added to the question bank.')
+    } catch (error) {
+      setUploadError(error.message)
+      if (error.status === 401) handleApiError(error)
+    }
+  }
+
+  function editQuestion(question) {
+    setEditingQuestionId(question.id)
+    setNewQuestion({
+      prompt: question.prompt,
+      options: [...question.options],
+      correctAnswer: question.correctAnswer,
+    })
+    setUploadError('')
+    setQuestionModalOpen(true)
+  }
+
+  async function deleteQuestion(questionId) {
+    if (!window.confirm('Delete this question?')) return
+    try {
+      await apiRequest(`/questions/${encodeURIComponent(questionId)}`, { method: 'DELETE', csrfToken })
+      setQuestions((current) => current.filter((question) => question.id !== questionId))
+      setSummary((current) => ({ ...current, totalQuestions: Math.max(0, current.totalQuestions - 1) }))
+      setUploadMessage('Question deleted.')
     } catch (error) {
       setUploadError(error.message)
       if (error.status === 401) handleApiError(error)
@@ -318,11 +351,68 @@ export default function AdminDashboard() {
     }
   }
 
+  async function updateAssessment(assessmentId, input) {
+    try {
+      const response = await apiRequest(`/assessments/${encodeURIComponent(assessmentId)}`, { method: 'PATCH', body: input, csrfToken })
+      setAssessments((current) => current.map((assessment) => assessment.id === assessmentId ? response.assessment : assessment))
+    } catch (error) {
+      if (error.status === 401) handleApiError(error)
+      throw error
+    }
+  }
+
+  async function deleteAssessment(assessmentId) {
+    try {
+      await apiRequest(`/assessments/${encodeURIComponent(assessmentId)}`, { method: 'DELETE', csrfToken })
+      setAssessments((current) => current.filter((assessment) => assessment.id !== assessmentId))
+    } catch (error) {
+      if (error.status === 401) handleApiError(error)
+      throw error
+    }
+  }
+
+  async function createMentee(input) {
+    try {
+      const response = await apiRequest('/mentees', { method: 'POST', body: input, csrfToken })
+      setMentees((current) => [response.mentee, ...current].sort((a, b) => a.name.localeCompare(b.name)))
+      setSummary((current) => ({ ...current, totalStudents: current.totalStudents + 1 }))
+    } catch (error) {
+      if (error.status === 401) handleApiError(error)
+      throw error
+    }
+  }
+
+  async function updateMentee(menteeId, input) {
+    try {
+      const response = await apiRequest(`/mentees/${encodeURIComponent(menteeId)}`, { method: 'PATCH', body: input, csrfToken })
+      setMentees((current) => current.map((mentee) => mentee.id === menteeId ? response.mentee : mentee).sort((a, b) => a.name.localeCompare(b.name)))
+    } catch (error) {
+      if (error.status === 401) handleApiError(error)
+      throw error
+    }
+  }
+
+  async function deleteMentee(menteeId) {
+    try {
+      await apiRequest(`/mentees/${encodeURIComponent(menteeId)}`, { method: 'DELETE', csrfToken })
+      setMentees((current) => current.filter((mentee) => mentee.id !== menteeId))
+      setSummary((current) => ({ ...current, totalStudents: Math.max(0, current.totalStudents - 1) }))
+    } catch (error) {
+      if (error.status === 401) handleApiError(error)
+      throw error
+    }
+  }
+
   const navigate = (label) => {
     setActiveView(label)
     setSearch('')
   }
-  const openQuestionModal = () => setQuestionModalOpen(true)
+  const openQuestionModal = () => {
+    setEditingQuestionId(null)
+    setNewQuestion({ prompt: '', options: ['', '', '', ''], correctAnswer: '' })
+    setUploadError('')
+    setQuestionModalOpen(true)
+  }
   const selectAnswer = (answer) => {
     setSelectedAnswer(answer)
     setAnswerFeedback(answer.feedback || '')
@@ -330,14 +420,16 @@ export default function AdminDashboard() {
   }
 
   const dashboard = {
-    questions, answers, flags, search, summary, assessments, mentees,
+    questions, answers, flags, search, summary, assessments, mentees, admin,
     answerFilter, setAnswerFilter,
     pendingAnswers, unresolvedFlags,
     navigate, openQuestionModal, selectAnswer,
     downloadTemplate, handleQuestionUpload,
+    editQuestion, deleteQuestion,
     uploadMessage, uploadError, fileInput,
     selectFlag, markFlagReviewed, flagReviewNote, setFlagReviewNote, flagReviewError,
-    createAssessment, updateAssessmentStatus,
+    createAssessment, updateAssessmentStatus, updateAssessment, deleteAssessment,
+    createMentee, updateMentee, deleteMentee,
   }
 
   const badges = { answers: pendingAnswers, flags: unresolvedFlags }
@@ -354,17 +446,17 @@ export default function AdminDashboard() {
 
   return (
     <div className="app-shell">
-      <DashboardSidebar views={dashboardViews} activeView={activeView} badges={badges} admin={admin} onNavigate={navigate} onHelp={() => setApiError('Help center is not configured.')} />
+      <DashboardSidebar views={dashboardViews} activeView={activeView} badges={badges} admin={admin} onNavigate={navigate} onHelp={() => setHelpOpen(true)} />
       <main className="main-area">
         <DashboardTopbar activeView={activeView} search={search} admin={admin} onSearch={setSearch} onLogout={handleLogout} />
-        <div className="demo-banner" role="status"><Icon name="alert" size={16} /><span><strong>Sample records:</strong> submissions, integrity signals, and mentees are example data. Questions, assessments, and review decisions are saved in SQLite.</span></div>
         {apiError && <div className="api-error" role="alert"><span>{apiError}</span><button onClick={() => setApiError('')} aria-label="Dismiss error"><Icon name="close" size={15} /></button></div>}
         <div className="content-area"><ActiveView dashboard={dashboard} /></div>
         <footer className="footer"><span>© 2026 Muna learning</span><span>Admin workspace <i /> All systems operational</span></footer>
       </main>
-      {questionModalOpen && <QuestionModal question={newQuestion} onQuestionChange={setNewQuestion} error={uploadError} onClose={() => setQuestionModalOpen(false)} onSubmit={addQuestion} />}
+      {questionModalOpen && <QuestionModal question={newQuestion} editing={Boolean(editingQuestionId)} onQuestionChange={setNewQuestion} error={uploadError} onClose={() => { setQuestionModalOpen(false); setEditingQuestionId(null) }} onSubmit={addQuestion} />}
       {selectedAnswer && <AnswerReviewModal answer={selectedAnswer} feedback={answerFeedback} error={answerReviewError} onFeedbackChange={(feedback) => { setAnswerFeedback(feedback); setAnswerReviewError('') }} onClose={() => setSelectedAnswer(null)} onReview={(decision) => markAnswerReviewed(selectedAnswer.id, decision, answerFeedback)} />}
       {selectedFlag && <FlagReviewModal flag={selectedFlag} note={flagReviewNote} error={flagReviewError} onNoteChange={(note) => { setFlagReviewNote(note); setFlagReviewError('') }} onClose={() => setSelectedFlag(null)} onReview={(decision) => markFlagReviewed(selectedFlag.id, decision)} />}
+      {helpOpen && <HelpCenterModal onClose={() => setHelpOpen(false)} onNavigate={navigate} />}
     </div>
   )
 }

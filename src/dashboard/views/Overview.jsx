@@ -4,13 +4,17 @@ import AnswerTable from '../components/AnswerTable'
 
 // Receives the `dashboard` context bag from AdminDashboard.jsx.
 export default function Overview({ dashboard }) {
-  const { questions, answers, summary, pendingAnswers, unresolvedFlags, navigate, openQuestionModal, selectAnswer } = dashboard
+  const { questions, answers, summary, pendingAnswers, unresolvedFlags, navigate, openQuestionModal, selectAnswer, admin } = dashboard
   const chartMax = Math.max(1, ...summary.weeklyActivity.map((item) => item.count))
+  const today = new Intl.DateTimeFormat('en', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' }).format(new Date())
+  const firstName = (admin?.name || 'Admin').trim().split(/\s+/)[0]
+  const hour = new Date().getHours()
+  const greeting = hour < 12 ? 'Good morning' : hour < 18 ? 'Good afternoon' : 'Good evening'
 
   return (
     <>
       <div className="welcome-row">
-        <div><p className="eyebrow">MONDAY, NOVEMBER 23, 2026</p><h1>Good morning, Alex <span>✦</span></h1><p className="subheading">Here&apos;s what&apos;s happening with your assessments today.</p></div>
+        <div><p className="eyebrow">{today.toUpperCase()}</p><h1>{greeting}, {firstName} <span>✦</span></h1><p className="subheading">Here&apos;s what&apos;s happening with your assessments today.</p></div>
         <button className="button button-primary" onClick={() => { navigate('Question bank'); openQuestionModal() }}><Icon name="plus" size={17} /> Create question</button>
       </div>
       <div className="stat-grid">
