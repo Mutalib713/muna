@@ -33,6 +33,7 @@ export default function Navbar({ onOpenModal }) {
           <a href="#studio" className="nav-link">Question Studio</a>
           <a href="#security" className="nav-link">Security Model</a>
           <a href="#workspaces" className="nav-link">Workspaces</a>
+          <a href="#/dashboard" className="nav-link">Dashboard</a>
         </nav>
 
         <div className="nav-actions">
@@ -70,6 +71,7 @@ export default function Navbar({ onOpenModal }) {
           <a href="#studio" onClick={closeMenu}>Question Studio</a>
           <a href="#security" onClick={closeMenu}>Security Model</a>
           <a href="#workspaces" onClick={closeMenu}>Workspaces</a>
+          <a href="#/dashboard" onClick={closeMenu}>Dashboard</a>
         </nav>
       </div>
     </header>
