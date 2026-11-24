@@ -84,6 +84,16 @@ export function createDatabase(filename) {
       assigned_at TEXT NOT NULL,
       PRIMARY KEY (assessment_id, mentee_id)
     );
+    CREATE TABLE IF NOT EXISTS assessment_attempts (
+      id TEXT PRIMARY KEY,
+      assessment_id TEXT NOT NULL REFERENCES assessments(id) ON DELETE CASCADE,
+      mentee_id TEXT NOT NULL REFERENCES mentees(id) ON DELETE CASCADE,
+      answers_json TEXT NOT NULL,
+      score TEXT NOT NULL,
+      submitted_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS assessment_attempts_lookup_idx
+      ON assessment_attempts (assessment_id, mentee_id, submitted_at);
     CREATE TABLE IF NOT EXISTS sessions (
       sid TEXT PRIMARY KEY,
       data TEXT NOT NULL,
