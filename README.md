@@ -1,20 +1,28 @@
-# React + Vite
+# MUNA 🧠
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+A mentor-led assessment platform with interactive question types and secure exam delivery.
 
-Currently, two official plugins are available:
+> **Muna**: make assessment creation expressive and easy for mentors, while making exam rules explicit, enforceable on the server, and honest about the limits of browser-only lockdown.
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+## What it does
 
-## React Compiler
+- **Mentors** create an organisation workspace, invite mentees, build interactive assessments, and grade submissions.
+- **Mentees** join via invitation, see assigned assessments, and complete them under configurable rules.
+- **Question types**: multiple choice, multi-select, true/false, short answer, long-form theory, and freehand drawing (first-class, not just an upload).
+- **Attempt rules**: 3 attempts by default, configurable time limits, availability windows, randomisation, and server-enforced attempt counting.
+- **Secure mode**: layered standard web controls (focus-loss detection, autosave, server-side grading) plus an optional Safe Exam Browser (SEB) mode for high-stakes exams.
 
-The React Compiler is enabled on this template. See [this documentation](https://react.dev/learn/react-compiler) for more information.
+## Tech stack
 
-Note: This will impact Vite dev & build performances.
-You can also try [the experimental native React Compiler support in plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react/README.md#rust-react-compiler) by using `compiler: true` in the plugin options instead of using the Babel plugin.
+| Layer    | Choice                                                |
+| :------- | :---------------------------------------------------- |
+| Frontend | React 19 + Vite + TypeScript                          |
+| Backend  | REST/typed RPC API with server-enforced authorization |
+| Database | PostgreSQL (tenant-aware, transactional attempts)     |
+| Storage  | Private object storage for drawings & media           |
+| Identity | Secure sessions, email verification, MFA for admins   |
 
-## Expanding the ESLint configuration
+## Getting started
 
 If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and [`typescript-eslint`](https://typescript-eslint.io) in your project.
 
@@ -31,3 +39,28 @@ The SQLite database is created at `data/muna.sqlite`. `.env` and `data/` are ign
 For production, build with `npm run build`, then run `npm start` with `NODE_ENV=production` and deployment-managed `ADMIN_EMAIL`, `ADMIN_PASSWORD`, and `SESSION_SECRET` values. Serve the app over HTTPS. If behind a reverse proxy, set `HOST=0.0.0.0`, configure `TRUST_PROXY_HOPS` to the exact trusted proxy count, and ensure the proxy preserves the external host and protocol while sanitizing forwarded headers. The backend includes rate-limited sign-in, HttpOnly/SameSite cookies, CSRF validation, and server-side authorization on admin APIs.
 
 Run backend tests with `npm test`.
+```bash
+npm install
+npm run dev      # start the dev server
+npm run build    # production build
+npm run lint     # lint the codebase
+```
+
+## Roadmap
+
+| Phase | Focus                                                   |
+| :---- | :------------------------------------------------------ |
+| 0     | Foundation: auth, organisations, tenant isolation      |
+| 1     | Core assessment: builder, MCQ, theory, attempts, timer |
+| 2     | Rich interaction: drawing canvas, rubrics, reports     |
+| 3     | Secure web mode: focus-loss policy, autosave, audit    |
+| 4     | SEB pilot                                               |
+| 5     | Scale & polish                                          |
+
+## Docs
+
+The full product definition lives in [`docs/PRD.md`](docs/PRD.md): requirements, architecture, threat model and phased delivery.
+
+## Security honesty 🤝
+
+No web-only solution can guarantee cheating is impossible. Muna uses precise language: _secure assessment mode_, not _cheat-proof_. Focus-loss events are recorded and reviewed by mentors, never silently judged.

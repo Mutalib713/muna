@@ -1,6 +1,6 @@
 import { Award, Users, CheckCircle2 } from '../icons'
 
-export default function WorkspacesSection({ onOpenModal }) {
+export default function WorkspacesSection() {
   return (
     <section id="workspaces" className="roles-section">
       <div className="content-wrap">
@@ -41,13 +41,9 @@ export default function WorkspacesSection({ onOpenModal }) {
               </div>
             </div>
 
-            <button
-              type="button"
-              className="btn btn-primary"
-              onClick={() => onOpenModal('mentor')}
-            >
+            <a className="btn btn-primary" href="/signup">
               Launch Mentor Studio
-            </button>
+            </a>
           </div>
 
           <div className="role-card">
@@ -78,13 +74,9 @@ export default function WorkspacesSection({ onOpenModal }) {
               </div>
             </div>
 
-            <button
-              type="button"
-              className="btn btn-outline"
-              onClick={() => onOpenModal('join')}
-            >
+            <a className="btn btn-outline" href="/signup?role=mentee">
               Join an Organisation
-            </button>
+            </a>
           </div>
         </div>
       </div>
