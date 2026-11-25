@@ -2,6 +2,7 @@ import { useMemo, useState } from 'react'
 import PaginationBar from '../components/PaginationBar'
 import { formatDateTime } from '../format'
 import { QUESTION_TYPE_LABELS } from '../questionTypes'
+import { getActiveOrganisationId } from '../services/adminApi'
 import './Assessments.css'
 
 const statusClass = {
@@ -14,6 +15,12 @@ const FEEDBACK_LABELS = {
   immediate: 'Immediate feedback',
   after_deadline: 'Feedback after deadline',
   manual: 'Manual feedback release',
+}
+
+const SECURITY_LABELS = {
+  standard: 'Standard web mode',
+  strict_web: 'Strict web mode',
+  seb: 'Safe Exam Browser (SEB)',
 }
 
 function initialsFor(name) {
@@ -50,6 +57,7 @@ function newAssessmentForm() {
     feedbackPolicy: 'immediate',
     securityMode: 'standard',
     requireFullscreen: false,
+    sebBrowserExamKey: '',
   }
 }
 
@@ -133,6 +141,7 @@ export default function Assessments({ dashboard }) {
         feedbackPolicy: form.feedbackPolicy,
         securityMode: form.securityMode,
         requireFullscreen: Boolean(form.requireFullscreen),
+        sebBrowserExamKey: form.securityMode === 'seb' ? form.sebBrowserExamKey.trim() : '',
       }
       if (editingAssessmentId) await saveAssessmentChanges(editingAssessmentId, input)
       else await saveAssessment(input)
@@ -217,6 +226,7 @@ export default function Assessments({ dashboard }) {
       feedbackPolicy: assessment.feedbackPolicy || 'immediate',
       securityMode: assessment.securityMode || 'standard',
       requireFullscreen: Boolean(assessment.requireFullscreen),
+      sebBrowserExamKey: assessment.sebBrowserExamKey || '',
     })
     setFormError('')
     setModalOpen(true)
@@ -227,6 +237,32 @@ export default function Assessments({ dashboard }) {
     setViewError('')
     try {
       await deleteAssessment(assessment.id)
+    } catch (error) {
+      setViewError(error.message)
+    }
+  }
+
+  async function downloadSebConfig(assessment) {
+    setViewError('')
+    try {
+      const headers = {}
+      const orgId = getActiveOrganisationId()
+      if (orgId) headers['X-Organisation-Id'] = orgId
+      const response = await fetch(`/api/assessments/${encodeURIComponent(assessment.id)}/seb-config`, {
+        credentials: 'same-origin',
+        headers,
+      })
+      if (!response.ok) {
+        const payload = await response.json().catch(() => ({}))
+        throw new Error(payload.error || 'Could not download Safe Exam Browser configuration.')
+      }
+      const blob = await response.blob()
+      const url = URL.createObjectURL(blob)
+      const link = document.createElement('a')
+      link.href = url
+      link.download = `muna-${assessment.id}.seb`
+      link.click()
+      URL.revokeObjectURL(url)
     } catch (error) {
       setViewError(error.message)
     }
@@ -286,7 +322,7 @@ export default function Assessments({ dashboard }) {
                     {assessment.shuffleQuestions && <span>Shuffled questions</span>}
                     {assessment.shuffleOptions && <span>Shuffled options</span>}
                     <span>{assessment.resultsReleased ? 'Results released' : (FEEDBACK_LABELS[assessment.feedbackPolicy] || 'Immediate feedback')}</span>
-                    <span>{assessment.securityMode === 'strict_web' ? 'Strict web mode' : 'Standard web mode'}</span>
+                    <span>{SECURITY_LABELS[assessment.securityMode] || SECURITY_LABELS.standard}</span>
                     {assessment.requireFullscreen && <span>Full-screen prompt</span>}
                   </div>
                   {(assessment.availableFrom || assessment.availableUntil) && (
@@ -324,6 +360,9 @@ export default function Assessments({ dashboard }) {
                   ) : (
                     <>
                       <button className="small-button" onClick={() => openExtraAttemptModal(assessment)}>Extra attempt</button>
+                      {assessment.securityMode === 'seb' && (
+                        <button className="small-button" onClick={() => downloadSebConfig(assessment)}>Download .seb</button>
+                      )}
                       {canReleaseManually && (
                         <button className="small-button" onClick={() => handleReleaseResults(assessment)}>Release results</button>
                       )}
@@ -398,8 +437,20 @@ export default function Assessments({ dashboard }) {
                 <select value={form.securityMode} onChange={(event) => setForm({ ...form, securityMode: event.target.value })}>
                   <option value="standard">Standard web mode (log focus events)</option>
                   <option value="strict_web">Strict web mode (lock &amp; submit on tab switch)</option>
+                  <option value="seb">Safe Exam Browser (SEB required)</option>
                 </select>
               </label>
+              {form.securityMode === 'seb' && (
+                <label className="form-label">
+                  Browser Exam Key <span className="assessment-optional">(optional 64-hex SHA-256)</span>
+                  <input
+                    maxLength="64"
+                    placeholder="Auto-generates Config Key on publish if blank"
+                    value={form.sebBrowserExamKey}
+                    onChange={(event) => setForm({ ...form, sebBrowserExamKey: event.target.value })}
+                  />
+                </label>
+              )}
             </div>
 
             <div className="assessment-toggles">

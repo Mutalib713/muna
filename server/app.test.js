@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { createHash } from 'node:crypto'
 import { test } from 'node:test'
 import request from 'supertest'
 import { createApp } from './app.js'
@@ -1084,6 +1085,125 @@ test('Phase 0 Auth: mentor signup, email verification, multi-org switching, and 
   assert.equal((await menteeClient.get('/api/learner/me')).body.mentees[0].id, menteeA.id)
   assert.equal((await menteeClient.get(`/api/learner/assessments/${menteeA.id}`)).status, 200)
   assert.equal((await menteeClient.get('/api/questions')).status, 403)
+
+  db.close()
+})
+
+test('Safe Exam Browser (SEB) mode generates config on publish and rejects ordinary browsers (FR-12)', async () => {
+  const db = createDatabase(':memory:')
+  const app = createApp({
+    db,
+    setupCode: 'test-setup-code',
+    sessionSecret: 'test-session-secret-long-enough-for-tests',
+  })
+  const client = request.agent(app)
+
+  const csrf = (await client.get('/api/auth/csrf')).body.csrfToken
+  const setup = await client.post('/api/auth/setup').set('X-CSRF-Token', csrf).send({
+    name: 'Admin',
+    email: 'admin@example.test',
+    password: 'test-admin-password-2026',
+    confirmPassword: 'test-admin-password-2026',
+    setupCode: 'test-setup-code',
+  })
+  const adminCsrf = setup.body.csrfToken
+
+  const q = (await client.post('/api/questions').set('X-CSRF-Token', adminCsrf).send({
+    type: 'mcq',
+    prompt: 'What enforces OS-level exam lockdown?',
+    options: ['Plain browser', 'Safe Exam Browser'],
+    correctAnswer: 'Safe Exam Browser',
+    difficulty: 'Easy',
+  })).body.question
+  const mentee = (await client.post('/api/mentees').set('X-CSRF-Token', adminCsrf).send({
+    name: 'Kofi Exam',
+    email: 'kofi@example.test',
+  })).body.mentee
+
+  const customBek = 'a'.repeat(64)
+  const draft = (await client.post('/api/assessments').set('X-CSRF-Token', adminCsrf).send({
+    title: 'SEB Final Exam',
+    questionIds: [q.id],
+    menteeIds: [mentee.id],
+    securityMode: 'seb',
+    sebBrowserExamKey: customBek,
+  })).body.assessment
+  assert.equal(draft.sebConfigReady, false)
+
+  // Draft cannot distribute .seb configuration yet
+  const draftSeb = await client.get(`/api/assessments/${draft.id}/seb-config`)
+  assert.equal(draftSeb.status, 409)
+
+  // Publish generates SEB config key and allows download
+  const pub = await client.patch(`/api/assessments/${draft.id}/status`).set('X-CSRF-Token', adminCsrf).send({ status: 'Published' })
+  assert.equal(pub.status, 200)
+  assert.equal(pub.body.assessment.sebConfigReady, true)
+
+  const sebMeta = await client.get(`/api/assessments/${draft.id}/seb-config?format=json`)
+  assert.equal(sebMeta.status, 200)
+  assert.match(sebMeta.body.sebConfigKey, /^[a-f0-9]{64}$/)
+
+  const sebFile = await client.get(`/api/learner/assessments/${draft.id}/seb-config?menteeId=${mentee.id}`)
+  assert.equal(sebFile.status, 200)
+  assert.ok(sebFile.text.includes('<key>sendBrowserExamKey</key>'))
+  assert.ok(sebFile.text.includes(`<string>${sebMeta.body.sebConfigKey}</string>`))
+
+  // Ordinary browser (even with spoofed SEB User-Agent and no valid hash) is rejected (403)
+  const ordinaryStart = await client
+    .post(`/api/learner/assessments/${draft.id}/start`)
+    .set('User-Agent', 'Mozilla/5.0 SEB/3.7.0')
+    .send({ menteeId: mentee.id })
+  assert.equal(ordinaryStart.status, 403)
+  assert.equal(ordinaryStart.body.sebRequired, true)
+
+  const ordinaryCheck = await client.get(`/api/learner/assessments/${draft.id}/seb-check?menteeId=${mentee.id}`)
+  assert.equal(ordinaryCheck.status, 200)
+  assert.equal(ordinaryCheck.body.sebVerified, false)
+
+  // Valid SEB ConfigKeyHash / RequestHash allows start, autosave, and submit
+  function sebRequestHash(path, key) {
+    // Supertest defaults Host header dynamically per request unless set explicitly.
+    return createHash('sha256').update(`http://127.0.0.1:80${path}${key}`).digest('hex')
+  }
+
+  const startPath = `/api/learner/assessments/${draft.id}/start`
+  const sebCheckValid = await client
+    .get(`/api/learner/assessments/${draft.id}/seb-check?menteeId=${mentee.id}`)
+    .set('Host', '127.0.0.1:80')
+    .set('X-SafeExamBrowser-ConfigKeyHash', sebRequestHash(`/api/learner/assessments/${draft.id}/seb-check?menteeId=${mentee.id}`, sebMeta.body.sebConfigKey))
+  assert.equal(sebCheckValid.status, 200)
+  assert.equal(sebCheckValid.body.sebVerified, true)
+
+  const validStart = await client
+    .post(startPath)
+    .set('Host', '127.0.0.1:80')
+    .set('X-SafeExamBrowser-ConfigKeyHash', sebRequestHash(startPath, sebMeta.body.sebConfigKey))
+    .send({ menteeId: mentee.id })
+  assert.equal(validStart.status, 201)
+  const attemptId = validStart.body.attempt.id
+
+  // Autosave without SEB header is rejected; with BEK RequestHash succeeds
+  const blockedSave = await client
+    .put(`/api/learner/attempts/${attemptId}/responses`)
+    .send({ menteeId: mentee.id, answers: { [q.id]: 'Safe Exam Browser' } })
+  assert.equal(blockedSave.status, 403)
+
+  const savePath = `/api/learner/attempts/${attemptId}/responses`
+  const validSave = await client
+    .put(savePath)
+    .set('Host', '127.0.0.1:80')
+    .set('X-SafeExamBrowser-RequestHash', sebRequestHash(savePath, customBek))
+    .send({ menteeId: mentee.id, answers: { [q.id]: 'Safe Exam Browser' } })
+  assert.equal(validSave.status, 200)
+
+  const submitPath = `/api/learner/assessments/${draft.id}/attempts`
+  const validSubmit = await client
+    .post(submitPath)
+    .set('Host', '127.0.0.1:80')
+    .set('X-SafeExamBrowser-ConfigKeyHash', sebRequestHash(submitPath, sebMeta.body.sebConfigKey))
+    .send({ menteeId: mentee.id, attemptId, answers: { [q.id]: 'Safe Exam Browser' } })
+  assert.equal(validSubmit.status, 201)
+  assert.equal(validSubmit.body.attempt.score, '1 / 1')
 
   db.close()
 })

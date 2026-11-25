@@ -30,10 +30,12 @@ function formatRemaining(ms) {
 }
 
 export default function LearnerAssessment({ hash }) {
-  const initialMenteeId = decodeURIComponent(hash.split('/')[2] || '')
+  const [hashPath, hashQuery] = hash.split('?')
+  const initialMenteeId = decodeURIComponent(hashPath.split('/')[2] || '')
+  const initialAssessmentId = new URLSearchParams(hashQuery || '').get('assessment') || ''
   const [menteeId, setMenteeId] = useState(initialMenteeId)
   const [assessments, setAssessments] = useState([])
-  const [selectedId, setSelectedId] = useState('')
+  const [selectedId, setSelectedId] = useState(initialAssessmentId)
   const [activeAttempt, setActiveAttempt] = useState(null)
   const [activeQuestions, setActiveQuestions] = useState([])
   const [currentIndex, setCurrentIndex] = useState(0)
@@ -44,6 +46,7 @@ export default function LearnerAssessment({ hash }) {
   const [starting, setStarting] = useState(false)
   const [submitting, setSubmitting] = useState(false)
   const [isFullscreen, setIsFullscreen] = useState(false)
+  const [sebStatus, setSebStatus] = useState(null)
   const [error, setError] = useState('')
   const [result, setResult] = useState(null)
   const answersRef = useRef({})
@@ -58,6 +61,27 @@ export default function LearnerAssessment({ hash }) {
     () => assessments.find((assessment) => assessment.id === selectedId),
     [assessments, selectedId],
   )
+
+  useEffect(() => {
+    if (!selected || selected.securityMode !== 'seb' || !menteeId.trim()) {
+      return undefined
+    }
+    let active = true
+    async function checkSeb() {
+      try {
+        const response = await fetch(
+          `/api/learner/assessments/${encodeURIComponent(selected.id)}/seb-check?menteeId=${encodeURIComponent(menteeId.trim())}`,
+        )
+        if (!response.ok) return
+        const payload = await response.json()
+        if (active) setSebStatus(payload)
+      } catch {
+        // Optional readiness probe; start endpoint enforces SEB server-side.
+      }
+    }
+    checkSeb()
+    return () => { active = false }
+  }, [selected, menteeId])
 
   const syncSelectionState = useCallback((list, preferredId) => {
     const target = list.find((item) => item.id === preferredId) || list[0] || null
@@ -385,16 +409,41 @@ export default function LearnerAssessment({ hash }) {
                     {selected.availabilityState === 'open' && (selected.availableUntil ? `Open until ${formatDateTime(selected.availableUntil)}` : 'Open')}
                   </dd></div>
                   <div><dt>Feedback</dt><dd>{FEEDBACK_POLICY_COPY[selected.feedbackPolicy] || FEEDBACK_POLICY_COPY.immediate}</dd></div>
-                  <div><dt>Security mode</dt><dd>{selected.securityMode === 'strict_web' ? 'Strict web mode (locks on tab switch)' : 'Standard web mode'}</dd></div>
-                  <div><dt>Readiness</dt><dd>{fullscreenSupported ? 'Browser ready (full-screen supported)' : 'Browser ready (full-screen unavailable)'}</dd></div>
+                  <div><dt>Security mode</dt><dd>
+                    {selected.securityMode === 'seb'
+                      ? 'Safe Exam Browser (SEB required)'
+                      : selected.securityMode === 'strict_web'
+                        ? 'Strict web mode (locks on tab switch)'
+                        : 'Standard web mode'}
+                  </dd></div>
+                  <div><dt>Readiness</dt><dd>
+                    {selected.securityMode === 'seb'
+                      ? (sebStatus?.sebVerified
+                        ? 'SEB session verified — ready to start'
+                        : 'SEB required — launch using the downloaded .seb file')
+                      : (fullscreenSupported ? 'Browser ready (full-screen supported)' : 'Browser ready (full-screen unavailable)')}
+                  </dd></div>
                 </dl>
 
                 <p className="assessment-draft-note">
                   Starting an assessment consumes <strong>1 attempt</strong>. Your answers autosave as you work, and refreshing resumes an active attempt.{' '}
-                  {selected.securityMode === 'strict_web'
-                    ? 'Under strict web mode, switching tabs or leaving the page will lock and submit your last saved answers for mentor review.'
-                    : 'Visibility and focus transitions are logged with server timestamps for mentor review.'}
+                  {selected.securityMode === 'seb'
+                    ? 'Open the .seb configuration file in Safe Exam Browser to start. Contact your mentor if you need an accessibility accommodation or fallback.'
+                    : selected.securityMode === 'strict_web'
+                      ? 'Under strict web mode, switching tabs or leaving the page will lock and submit your last saved answers for mentor review.'
+                      : 'Visibility and focus transitions are logged with server timestamps for mentor review.'}
                 </p>
+
+                {selected.securityMode === 'seb' && selected.sebConfigReady && (
+                  <p style={{ margin: '0 0 12px' }}>
+                    <a
+                      className="button button-secondary"
+                      href={`/api/learner/assessments/${encodeURIComponent(selected.id)}/seb-config?menteeId=${encodeURIComponent(menteeId.trim())}`}
+                    >
+                      Download .seb configuration file
+                    </a>
+                  </p>
+                )}
 
                 {result && (
                   <div className={`learner-receipt ${result.status === 'terminated_focus_lost' ? 'learner-terminated' : ''}`} role="status">

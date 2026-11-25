@@ -69,7 +69,8 @@ function requireAuth(req, res, next) {
 
 const NAVIGATION_MODES = ['free', 'sequential']
 const FEEDBACK_POLICIES = ['immediate', 'after_deadline', 'manual']
-const SECURITY_MODES = ['standard', 'strict_web']
+const SECURITY_MODES = ['standard', 'strict_web', 'seb']
+const SEB_KEY_REGEX = /^[a-f0-9]{64}$/i
 const SECURITY_EVENT_TYPES = [
   'fullscreen_entered',
   'fullscreen_exited',
@@ -78,6 +79,104 @@ const SECURITY_EVENT_TYPES = [
   'window_blur',
   'window_focus',
 ]
+
+function escapeXml(value) {
+  return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&apos;')
+}
+
+function buildSebConfigPlist({ assessment, startUrl, quitUrl }) {
+  const sendExamKey = assessment.seb_browser_exam_key || assessment.seb_config_key || ''
+  return [
+    '<?xml version="1.0" encoding="UTF-8"?>',
+    '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">',
+    '<plist version="1.0">',
+    '<dict>',
+    '  <key>startURL</key>',
+    `  <string>${escapeXml(startUrl)}</string>`,
+    '  <key>sendBrowserExamKey</key>',
+    '  <true/>',
+    '  <key>allowQuit</key>',
+    '  <true/>',
+    '  <key>quitURL</key>',
+    `  <string>${escapeXml(quitUrl)}</string>`,
+    '  <key>browserViewMode</key>',
+    '  <integer>1</integer>',
+    '  <key>showTaskBar</key>',
+    '  <true/>',
+    '  <key>allowSwitchToApplications</key>',
+    '  <false/>',
+    '  <key>enableURLFilter</key>',
+    '  <false/>',
+    '  <key>examSessionClearCookiesOnEnd</key>',
+    '  <false/>',
+    '  <key>munaAssessmentId</key>',
+    `  <string>${escapeXml(assessment.id)}</string>`,
+    '  <key>munaConfigKey</key>',
+    `  <string>${escapeXml(assessment.seb_config_key || '')}</string>`,
+    ...(sendExamKey
+      ? ['  <key>browserExamKey</key>', `  <string>${escapeXml(sendExamKey)}</string>`]
+      : []),
+    '</dict>',
+    '</plist>',
+  ].join('\n')
+}
+
+function requestCandidateUrls(req) {
+  const host = req.get('host') || '127.0.0.1'
+  const forwardedProto = typeof req.get('x-forwarded-proto') === 'string'
+    ? req.get('x-forwarded-proto').split(',')[0].trim()
+    : ''
+  const protos = new Set([req.protocol || 'http', ...(forwardedProto ? [forwardedProto] : [])])
+  const fullPath = req.originalUrl || req.url || '/'
+  const cleanPath = fullPath.split('?')[0]
+  const urls = new Set()
+  for (const proto of protos) {
+    urls.add(`${proto}://${host}${fullPath}`)
+    urls.add(`${proto}://${host}${cleanPath}`)
+  }
+  return urls
+}
+
+function sebHashMatches(headerValue, candidateUrls, secretKey) {
+  if (typeof headerValue !== 'string' || !secretKey) return false
+  const received = headerValue.trim().toLowerCase()
+  if (!SEB_KEY_REGEX.test(received)) return false
+  const receivedBuf = Buffer.from(received, 'hex')
+  for (const url of candidateUrls) {
+    const expected = createHash('sha256').update(`${url}${secretKey}`).digest()
+    if (expected.length === receivedBuf.length && timingSafeEqual(expected, receivedBuf)) {
+      return true
+    }
+  }
+  return false
+}
+
+function verifySebRequest(req, assessment) {
+  if (assessment.security_mode !== 'seb') {
+    return { ok: true, method: 'not_required' }
+  }
+  const urls = requestCandidateUrls(req)
+  const configHash = req.get('x-safeexambrowser-configkeyhash')
+  if (sebHashMatches(configHash, urls, assessment.seb_config_key)) {
+    return { ok: true, method: 'config_key' }
+  }
+  const requestHash = req.get('x-safeexambrowser-requesthash')
+  if (sebHashMatches(requestHash, urls, assessment.seb_browser_exam_key)) {
+    return { ok: true, method: 'browser_exam_key' }
+  }
+  if (sebHashMatches(requestHash, urls, assessment.seb_config_key)) {
+    return { ok: true, method: 'config_request_hash' }
+  }
+  return {
+    ok: false,
+    error: 'Safe Exam Browser is required for this assessment. Launch it using the downloaded Muna .seb configuration file.',
+  }
+}
 
 function parseOptionalIsoDate(value) {
   if (value === undefined || value === null || value === '') return null
@@ -135,7 +234,12 @@ function validateAssessment(input) {
   }
   const securityMode = input.securityMode ?? 'standard'
   if (!SECURITY_MODES.includes(securityMode)) {
-    return 'Security mode must be standard or strict_web.'
+    return 'Security mode must be standard, strict_web, or seb.'
+  }
+  if (input.sebBrowserExamKey !== undefined && input.sebBrowserExamKey !== null && input.sebBrowserExamKey !== '') {
+    if (typeof input.sebBrowserExamKey !== 'string' || !SEB_KEY_REGEX.test(input.sebBrowserExamKey.trim())) {
+      return 'Browser Exam Key must be a 64-character SHA-256 hex string.'
+    }
   }
   return null
 }
@@ -145,6 +249,11 @@ function normalizeAssessmentSettings(input) {
     input.timeLimitMinutes === undefined || input.timeLimitMinutes === null || input.timeLimitMinutes === ''
       ? null
       : Number(input.timeLimitMinutes)
+  const securityMode = input.securityMode ?? 'standard'
+  const sebBrowserExamKey =
+    securityMode === 'seb' && typeof input.sebBrowserExamKey === 'string' && input.sebBrowserExamKey.trim()
+      ? input.sebBrowserExamKey.trim().toLowerCase()
+      : null
   return {
     title: input.title.trim(),
     description: (input.description || '').trim(),
@@ -156,8 +265,9 @@ function normalizeAssessmentSettings(input) {
     shuffleOptions: input.shuffleOptions ? 1 : 0,
     navigationMode: input.navigationMode ?? 'free',
     feedbackPolicy: input.feedbackPolicy ?? 'immediate',
-    securityMode: input.securityMode ?? 'standard',
+    securityMode,
     requireFullscreen: input.requireFullscreen ? 1 : 0,
+    sebBrowserExamKey,
   }
 }
 
@@ -1212,6 +1322,7 @@ export function createApp({
           feedbackPolicy: row.feedback_policy || 'immediate',
           securityMode: row.security_mode || 'standard',
           requireFullscreen: Boolean(row.require_fullscreen),
+          sebConfigReady: Boolean(row.seb_config_key),
           resultsVisible: showResults,
           activeAttempt: activeAttemptRow ? {
             id: activeAttemptRow.id,
@@ -1235,6 +1346,64 @@ export function createApp({
     })
   })
 
+  router.get('/learner/assessments/:id/seb-check', requireAuth, (req, res) => {
+    const menteeId = typeof req.query.menteeId === 'string' ? req.query.menteeId : ''
+    const assessment = db.prepare('SELECT * FROM assessments WHERE id = ?').get(req.params.id)
+    const mentee = menteeId ? db.prepare('SELECT * FROM mentees WHERE id = ?').get(menteeId) : null
+    if (!assessment || !mentee || (mentee.organisation_id || 'ORG-DEFAULT') !== (assessment.organisation_id || 'ORG-DEFAULT')) {
+      res.status(404).json({ error: 'Assessment not found.' })
+      return
+    }
+    const access = checkLearnerAccess(req, mentee)
+    if (!access.ok) {
+      res.status(access.statusCode).json({ error: access.error })
+      return
+    }
+    const check = verifySebRequest(req, assessment)
+    const userAgent = String(req.get('user-agent') || '')
+    res.json({
+      sebRequired: assessment.security_mode === 'seb',
+      sebConfigReady: Boolean(assessment.seb_config_key),
+      sebVerified: check.ok,
+      verificationMethod: check.method || null,
+      userAgentDetected: /\bSEB\//i.test(userAgent),
+      message: check.ok
+        ? 'Safe Exam Browser session verified.'
+        : check.error,
+    })
+  })
+
+  router.get('/learner/assessments/:id/seb-config', requireAuth, (req, res) => {
+    const menteeId = typeof req.query.menteeId === 'string' ? req.query.menteeId : ''
+    const assessment = db.prepare('SELECT * FROM assessments WHERE id = ?').get(req.params.id)
+    const mentee = menteeId ? db.prepare('SELECT * FROM mentees WHERE id = ?').get(menteeId) : null
+    if (!assessment || !mentee || (mentee.organisation_id || 'ORG-DEFAULT') !== (assessment.organisation_id || 'ORG-DEFAULT')) {
+      res.status(404).json({ error: 'Assessment not found.' })
+      return
+    }
+    const access = checkLearnerAccess(req, mentee)
+    if (!access.ok) {
+      res.status(access.statusCode).json({ error: access.error })
+      return
+    }
+    if (assessment.security_mode !== 'seb') {
+      res.status(400).json({ error: 'Safe Exam Browser is not enabled for this assessment.' })
+      return
+    }
+    if (assessment.status === 'Draft' || !assessment.seb_config_key) {
+      res.status(409).json({ error: 'Safe Exam Browser configuration is available after the assessment is published.' })
+      return
+    }
+    const host = req.get('host') || '127.0.0.1'
+    const origin = `${req.protocol || 'http'}://${host}`
+    const startUrl = `${origin}/#/learner/${encodeURIComponent(mentee.id)}?assessment=${encodeURIComponent(assessment.id)}`
+    const quitUrl = `${origin}/#/learner/${encodeURIComponent(mentee.id)}`
+    const plist = buildSebConfigPlist({ assessment, startUrl, quitUrl })
+    res.set('Content-Type', 'application/seb; charset=utf-8')
+    res.set('Content-Disposition', `attachment; filename="muna-${assessment.id}.seb"`)
+    res.send(plist)
+  })
+
   router.post('/learner/assessments/:id/start', requireAuth, (req, res) => {
     const menteeId = typeof req.body?.menteeId === 'string' ? req.body.menteeId : ''
     const startTx = db.transaction(() => {
@@ -1250,6 +1419,10 @@ export function createApp({
       }
       const access = checkLearnerAccess(req, mentee)
       if (!access.ok) return { statusCode: access.statusCode, error: access.error }
+      const sebCheck = verifySebRequest(req, assessment)
+      if (!sebCheck.ok) {
+        return { statusCode: 403, error: sebCheck.error, sebRequired: true }
+      }
 
       const availability = getAvailabilityState(assessment)
       if (availability === 'upcoming') {
@@ -1372,7 +1545,7 @@ export function createApp({
 
     const outcome = startTx.immediate()
     if (outcome.error) {
-      res.status(outcome.statusCode).json({ error: outcome.error })
+      res.status(outcome.statusCode).json({ error: outcome.error, ...(outcome.sebRequired ? { sebRequired: true } : {}) })
       return
     }
     res.status(outcome.statusCode).json({
@@ -1403,6 +1576,11 @@ export function createApp({
     const access = checkLearnerAccess(req, mentee)
     if (!access.ok) {
       res.status(access.statusCode).json({ error: access.error })
+      return
+    }
+    const sebCheck = verifySebRequest(req, assessment)
+    if (!sebCheck.ok) {
+      res.status(403).json({ error: sebCheck.error, sebRequired: true })
       return
     }
     const expired = expireOverdueAttemptIfNeeded(assessment, mentee, attempt)
@@ -1592,6 +1770,11 @@ export function createApp({
     const access = checkLearnerAccess(req, mentee)
     if (!access.ok) {
       res.status(access.statusCode).json({ error: access.error })
+      return
+    }
+    const sebCheck = verifySebRequest(req, assessment)
+    if (!sebCheck.ok) {
+      res.status(403).json({ error: sebCheck.error, sebRequired: true })
       return
     }
     const submittedAnswers = req.body?.answers
@@ -2164,9 +2347,9 @@ export function createApp({
         INSERT INTO assessments (
           id, organisation_id, title, description, max_attempts, time_limit_minutes, available_from, available_until,
           shuffle_questions, shuffle_options, navigation_mode, feedback_policy, results_released,
-          security_mode, require_fullscreen, status, created_at, updated_at
+          security_mode, require_fullscreen, seb_browser_exam_key, status, created_at, updated_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, 'Draft', ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, 'Draft', ?, ?)
       `).run(
         assessmentId,
         req.org.id,
@@ -2182,6 +2365,7 @@ export function createApp({
         settings.feedbackPolicy,
         settings.securityMode,
         settings.requireFullscreen,
+        settings.sebBrowserExamKey,
         now,
         now,
       )
@@ -2211,9 +2395,67 @@ export function createApp({
       return
     }
     const updatedAt = new Date().toISOString()
-    db.prepare('UPDATE assessments SET status = ?, updated_at = ? WHERE id = ? AND organisation_id = ?').run(status, updatedAt, req.params.id, req.org.id)
+    db.transaction(() => {
+      let nextSebConfigKey = existing.seb_config_key || null
+      if (status === 'Published' && existing.security_mode === 'seb' && !nextSebConfigKey) {
+        nextSebConfigKey = randomBytes(32).toString('hex')
+        logAudit(db, {
+          organisationId: req.org.id,
+          actor: req.session.user.name,
+          action: 'generate_seb_config',
+          entityType: 'assessment',
+          entityId: req.params.id,
+          detail: { title: existing.title },
+        })
+      }
+      db.prepare('UPDATE assessments SET status = ?, seb_config_key = ?, updated_at = ? WHERE id = ? AND organisation_id = ?')
+        .run(status, nextSebConfigKey, updatedAt, req.params.id, req.org.id)
+    })()
     const row = db.prepare('SELECT * FROM assessments WHERE id = ?').get(req.params.id)
     res.json({ assessment: assessmentFromRow(db, row) })
+  })
+
+  router.get('/assessments/:id/seb-config', (req, res) => {
+    const assessment = db.prepare('SELECT * FROM assessments WHERE id = ? AND organisation_id = ?').get(req.params.id, req.org.id)
+    if (!assessment) {
+      res.status(404).json({ error: 'Assessment not found.' })
+      return
+    }
+    if (assessment.security_mode !== 'seb') {
+      res.status(400).json({ error: 'Enable Safe Exam Browser mode on this assessment to generate a .seb file.' })
+      return
+    }
+    if (assessment.status === 'Draft' || !assessment.seb_config_key) {
+      res.status(409).json({ error: 'Publish the assessment before distributing its Safe Exam Browser configuration.' })
+      return
+    }
+    const host = req.get('host') || '127.0.0.1'
+    const origin = `${req.protocol || 'http'}://${host}`
+    const startUrl = `${origin}/#/learner`
+    const quitUrl = `${origin}/#/learner`
+    logAudit(db, {
+      organisationId: req.org.id,
+      actor: req.session.user.name,
+      action: 'download_seb_config',
+      entityType: 'assessment',
+      entityId: assessment.id,
+      detail: { title: assessment.title, format: req.query.format === 'json' ? 'json' : 'seb' },
+    })
+    if (req.query.format === 'json') {
+      res.json({
+        assessmentId: assessment.id,
+        sebConfigKey: assessment.seb_config_key,
+        sebBrowserExamKey: assessment.seb_browser_exam_key || null,
+        startUrl,
+        quitUrl,
+        downloadPath: `/api/assessments/${encodeURIComponent(assessment.id)}/seb-config`,
+      })
+      return
+    }
+    const plist = buildSebConfigPlist({ assessment, startUrl, quitUrl })
+    res.set('Content-Type', 'application/seb; charset=utf-8')
+    res.set('Content-Disposition', `attachment; filename="muna-${assessment.id}.seb"`)
+    res.send(plist)
   })
 
   router.post('/assessments/:id/release-results', verifyCsrf, (req, res) => {
@@ -2317,7 +2559,7 @@ export function createApp({
         SET title = ?, description = ?, max_attempts = ?, time_limit_minutes = ?,
             available_from = ?, available_until = ?, shuffle_questions = ?, shuffle_options = ?,
             navigation_mode = ?, feedback_policy = ?, security_mode = ?, require_fullscreen = ?,
-            updated_at = ?
+            seb_browser_exam_key = ?, updated_at = ?
         WHERE id = ? AND organisation_id = ?
       `).run(
         settings.title,
@@ -2332,6 +2574,7 @@ export function createApp({
         settings.feedbackPolicy,
         settings.securityMode,
         settings.requireFullscreen,
+        settings.sebBrowserExamKey,
         now,
         req.params.id,
         req.org.id,

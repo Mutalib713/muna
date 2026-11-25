@@ -105,8 +105,10 @@ export function createDatabase(filename) {
       navigation_mode TEXT NOT NULL DEFAULT 'free' CHECK (navigation_mode IN ('free', 'sequential')),
       feedback_policy TEXT NOT NULL DEFAULT 'immediate' CHECK (feedback_policy IN ('immediate', 'after_deadline', 'manual')),
       results_released INTEGER NOT NULL DEFAULT 0 CHECK (results_released IN (0, 1)),
-      security_mode TEXT NOT NULL DEFAULT 'standard' CHECK (security_mode IN ('standard', 'strict_web')),
+      security_mode TEXT NOT NULL DEFAULT 'standard' CHECK (security_mode IN ('standard', 'strict_web', 'seb')),
       require_fullscreen INTEGER NOT NULL DEFAULT 0 CHECK (require_fullscreen IN (0, 1)),
+      seb_config_key TEXT,
+      seb_browser_exam_key TEXT,
       status TEXT NOT NULL DEFAULT 'Draft' CHECK (status IN ('Draft', 'Published', 'Paused')),
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
@@ -293,9 +295,60 @@ export function createDatabase(filename) {
   ensureColumn('assessments', 'results_released', 'INTEGER NOT NULL DEFAULT 0')
   ensureColumn('assessments', 'security_mode', "TEXT NOT NULL DEFAULT 'standard'")
   ensureColumn('assessments', 'require_fullscreen', 'INTEGER NOT NULL DEFAULT 0')
+  ensureColumn('assessments', 'seb_config_key', 'TEXT')
+  ensureColumn('assessments', 'seb_browser_exam_key', 'TEXT')
   ensureColumn('assessment_attempts', 'termination_reason', 'TEXT')
   ensureColumn('flags', 'attempt_id', 'TEXT')
   ensureColumn('flags', 'created_at', 'TEXT')
+
+  // Rebuild assessments if an older SQLite database lacks 'seb' in security_mode CHECK.
+  const assessmentsTableSql = db.prepare(
+    "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'assessments'"
+  ).get()?.sql || ''
+  if (assessmentsTableSql && !assessmentsTableSql.includes("'seb'")) {
+    db.pragma('foreign_keys = OFF')
+    db.transaction(() => {
+      db.exec(`
+        CREATE TABLE assessments_new (
+          id TEXT PRIMARY KEY,
+          organisation_id TEXT NOT NULL DEFAULT 'ORG-DEFAULT',
+          title TEXT NOT NULL,
+          description TEXT NOT NULL DEFAULT '',
+          max_attempts INTEGER NOT NULL DEFAULT 3 CHECK (max_attempts BETWEEN 1 AND 3),
+          time_limit_minutes INTEGER,
+          available_from TEXT,
+          available_until TEXT,
+          shuffle_questions INTEGER NOT NULL DEFAULT 0 CHECK (shuffle_questions IN (0, 1)),
+          shuffle_options INTEGER NOT NULL DEFAULT 0 CHECK (shuffle_options IN (0, 1)),
+          navigation_mode TEXT NOT NULL DEFAULT 'free' CHECK (navigation_mode IN ('free', 'sequential')),
+          feedback_policy TEXT NOT NULL DEFAULT 'immediate' CHECK (feedback_policy IN ('immediate', 'after_deadline', 'manual')),
+          results_released INTEGER NOT NULL DEFAULT 0 CHECK (results_released IN (0, 1)),
+          security_mode TEXT NOT NULL DEFAULT 'standard' CHECK (security_mode IN ('standard', 'strict_web', 'seb')),
+          require_fullscreen INTEGER NOT NULL DEFAULT 0 CHECK (require_fullscreen IN (0, 1)),
+          seb_config_key TEXT,
+          seb_browser_exam_key TEXT,
+          status TEXT NOT NULL DEFAULT 'Draft' CHECK (status IN ('Draft', 'Published', 'Paused')),
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+        INSERT INTO assessments_new (
+          id, organisation_id, title, description, max_attempts, time_limit_minutes,
+          available_from, available_until, shuffle_questions, shuffle_options, navigation_mode,
+          feedback_policy, results_released, security_mode, require_fullscreen,
+          seb_config_key, seb_browser_exam_key, status, created_at, updated_at
+        )
+        SELECT
+          id, organisation_id, title, description, max_attempts, time_limit_minutes,
+          available_from, available_until, shuffle_questions, shuffle_options, navigation_mode,
+          feedback_policy, results_released, security_mode, require_fullscreen,
+          seb_config_key, seb_browser_exam_key, status, created_at, updated_at
+        FROM assessments;
+        DROP TABLE assessments;
+        ALTER TABLE assessments_new RENAME TO assessments;
+      `)
+    })()
+    db.pragma('foreign_keys = ON')
+  }
 
   // Rebuild assessment_attempts if an older SQLite database lacks 'terminated_focus_lost' in status CHECK.
   const attemptsTableSql = db.prepare(
@@ -586,6 +639,9 @@ export function assessmentFromRow(db, row) {
     resultsReleased: Boolean(row.results_released),
     securityMode: row.security_mode || 'standard',
     requireFullscreen: Boolean(row.require_fullscreen),
+    sebConfigReady: Boolean(row.seb_config_key),
+    hasSebBrowserExamKey: Boolean(row.seb_browser_exam_key),
+    sebBrowserExamKey: row.seb_browser_exam_key || '',
     status: row.status,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
