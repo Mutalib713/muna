@@ -1,5 +1,4 @@
-import { useEffect, useState } from 'react'
-import { lazy, Suspense, useState } from 'react'
+import { useEffect, useState, lazy, Suspense } from 'react'
 import Navbar from './components/Navbar'
 import Hero from './components/Hero'
 import QuestionStudio from './components/QuestionStudio/QuestionStudio'
@@ -25,7 +24,6 @@ function useHashRoute() {
   return hash
 }
 import LoadingScreen from './components/ui/LoadingScreen'
-import './App.css'
 
 const Signup = lazy(() => import('./pages/Signup.jsx'))
 const Login = lazy(() => import('./pages/Login.jsx'))
