@@ -31,12 +31,14 @@ If you are developing a production application, we recommend using TypeScript wi
 The admin dashboard is available at `#/dashboard`. Its Express API enforces admin sessions server-side and stores questions, assessments, assignments, review decisions, integrity follow-ups, sessions, and audit history in SQLite.
 
 1. Install dependencies with `npm install`.
-2. Run `npm run setup` in an interactive terminal. It prompts for the single admin email, display name, and a password without echoing it, then creates a local `.env` and random session secret. Use 14-72 UTF-8 bytes for the password.
-3. Start the frontend and API together with `npm run dev`.
+2. Run `npm run setup` to create a local `.env` containing a random session secret and one-time setup code. Keep `SETUP_CODE` private.
+3. Start the frontend and API together with `npm run dev`, then open `#/dashboard`. On first visit, enter your name, email, password (at least 10 characters), password confirmation, and the `SETUP_CODE` from `.env`. The setup form is available only until the first admin account is created.
 
 The SQLite database is created at `data/muna.sqlite`. `.env` and `data/` are ignored by Git. The database starts without seeded submissions, mentees, or integrity signals. Use the Mentees view to create students, assign assessments, and open the learner workflow at `#/learner/<mentee-id>`. Learner attempts are stored in SQLite and cannot exceed the assessment's 1–3 attempt limit.
 
-For production, build with `npm run build`, then run `npm start` with `NODE_ENV=production` and deployment-managed `ADMIN_EMAIL`, `ADMIN_PASSWORD`, and `SESSION_SECRET` values. Serve the app over HTTPS. If behind a reverse proxy, set `HOST=0.0.0.0`, configure `TRUST_PROXY_HOPS` to the exact trusted proxy count, and ensure the proxy preserves the external host and protocol while sanitizing forwarded headers. The backend includes rate-limited sign-in, HttpOnly/SameSite cookies, CSRF validation, and server-side authorization on admin APIs.
+For production, build with `npm run build`, then run `npm start` with `NODE_ENV=production` and deployment-managed `SESSION_SECRET` and `SETUP_CODE` values. Serve the app over HTTPS. If behind a reverse proxy, set `HOST=0.0.0.0`, configure `TRUST_PROXY_HOPS` to the exact trusted proxy count, and ensure the proxy preserves the external host and protocol while sanitizing forwarded headers. Admin credentials are stored in SQLite with a bcrypt-hashed password. The backend rate-limits sign-in and setup, and uses HttpOnly/SameSite cookies, CSRF validation, and server-side authorization on admin APIs.
+
+If the admin forgets their password, stop the server and run `npm run reset-admin` in the project directory (with the same `DATABASE_PATH` configuration). The command deletes the admin account; restart the server and use the setup form with `SETUP_CODE` to create a replacement account.
 
 Run backend tests with `npm test`.
 ```bash

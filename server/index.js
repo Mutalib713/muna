@@ -1,33 +1,21 @@
 import 'dotenv/config'
-import { Buffer } from 'node:buffer'
 import { mkdirSync } from 'node:fs'
 import path from 'node:path'
 import process from 'node:process'
 import { fileURLToPath } from 'node:url'
-import bcrypt from 'bcryptjs'
 import { createApp } from './app.js'
 import { createDatabase } from './db.js'
 
 const serverDirectory = path.dirname(fileURLToPath(import.meta.url))
 const projectDirectory = path.resolve(serverDirectory, '..')
-const adminEmail = process.env.ADMIN_EMAIL?.trim()
-const adminPassword = process.env.ADMIN_PASSWORD
 const sessionSecret = process.env.SESSION_SECRET
+const setupCode = process.env.SETUP_CODE
 const port = Number(process.env.PORT || 3001)
 const host = process.env.HOST || '127.0.0.1'
 const trustProxyHops = Number(process.env.TRUST_PROXY_HOPS || 0)
 
-if (!adminEmail || !adminPassword || !sessionSecret) {
-  throw new Error('Set ADMIN_EMAIL, ADMIN_PASSWORD, and SESSION_SECRET in your environment or .env file.')
-}
-if (adminEmail === 'admin@example.com' || adminPassword === 'replace-with-a-long-unique-password') {
-  throw new Error('Replace the example admin email and password before starting the server.')
-}
-if (adminPassword.length < 14) {
-  throw new Error('ADMIN_PASSWORD must be at least 14 characters long.')
-}
-if (Buffer.byteLength(adminPassword, 'utf8') > 72) {
-  throw new Error('ADMIN_PASSWORD must be no more than 72 UTF-8 bytes.')
+if (!sessionSecret || !setupCode) {
+  throw new Error('Set SESSION_SECRET and SETUP_CODE in your environment or .env file.')
 }
 if (sessionSecret.length < 32 || sessionSecret === 'replace-with-a-random-secret-at-least-32-characters') {
   throw new Error('SESSION_SECRET must be a unique random value of at least 32 characters.')
@@ -50,14 +38,10 @@ if (process.env.NODE_ENV === 'production' && databasePath === ':memory:') {
   throw new Error('Production requires a persistent DATABASE_PATH.')
 }
 const db = createDatabase(databasePath)
-const passwordHash = await bcrypt.hash(adminPassword, 12)
-delete process.env.ADMIN_PASSWORD
 
 const app = createApp({
   db,
-  adminEmail,
-  adminName: process.env.ADMIN_NAME || 'Administrator',
-  passwordHash,
+  setupCode,
   sessionSecret,
   production: process.env.NODE_ENV === 'production',
   trustProxyHops,

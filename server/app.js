@@ -191,9 +191,7 @@ function getReviewHistory(db, entityType, entityId) {
 
 export function createApp({
   db,
-  adminEmail,
-  adminName = 'Administrator',
-  passwordHash,
+  setupCode,
   sessionSecret,
   production = false,
   trustProxyHops = 0,
@@ -203,14 +201,14 @@ export function createApp({
 }) {
   const app = express()
   const router = express.Router()
-  const workspace = ensureWorkspaceBootstrap(db, { adminEmail, adminName, orgName, orgSlug })
+  const workspace = ensureWorkspaceBootstrap(db, { orgName, orgSlug })
   const organisationId = workspace.organisation.id
-  const loginLimiter = rateLimit({
+  const authLimiter = rateLimit({
     windowMs: 15 * 60 * 1000,
     limit: 10,
     standardHeaders: 'draft-8',
     legacyHeaders: false,
-    message: { error: 'Too many sign-in attempts. Try again in 15 minutes.' },
+    message: { error: 'Too many authentication attempts. Try again in 15 minutes.' },
   })
   const inviteLimiter = rateLimit({
     windowMs: 15 * 60 * 1000,
@@ -265,31 +263,91 @@ export function createApp({
     res.json({ csrfToken: req.session.csrfToken })
   })
 
-  router.post('/auth/login', loginLimiter, verifyCsrf, async (req, res, next) => {
+  router.get('/auth/status', (req, res) => {
+    res.json({ setupRequired: !db.prepare('SELECT 1 FROM admin_account WHERE id = 1').get() })
+  })
+
+  function signAdminIn(req, res, next, admin) {
+    req.session.regenerate((error) => {
+      if (error) {
+        next(error)
+        return
+      }
+      req.session.admin = { email: admin.email, name: admin.name, role: 'admin' }
+      req.session.csrfToken = randomBytes(32).toString('hex')
+      req.session.save((saveError) => {
+        if (saveError) {
+          next(saveError)
+          return
+        }
+        res.json({ user: req.session.admin, csrfToken: req.session.csrfToken })
+      })
+    })
+  }
+
+  router.post('/auth/setup', (req, res, next) => {
+    if (db.prepare('SELECT 1 FROM admin_account WHERE id = 1').get()) {
+      res.status(403).json({ error: 'An admin account has already been created.' })
+      return
+    }
+    next()
+  }, authLimiter, verifyCsrf, async (req, res, next) => {
     try {
+      const name = typeof req.body?.name === 'string' ? req.body.name.trim() : ''
       const email = typeof req.body?.email === 'string' ? req.body.email.trim().toLowerCase() : ''
       const password = typeof req.body?.password === 'string' ? req.body.password : ''
-      const passwordMatches = await bcrypt.compare(password, passwordHash)
-      if (!email || email !== adminEmail.toLowerCase() || !passwordMatches) {
-        res.status(401).json({ error: 'Invalid email or password.' })
+      const confirmPassword = typeof req.body?.confirmPassword === 'string' ? req.body.confirmPassword : ''
+      const submittedCode = typeof req.body?.setupCode === 'string' ? req.body.setupCode : ''
+      if (!name || name.length > 120 || !email || email.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+        res.status(400).json({ error: 'Enter your name and a valid email address.' })
+        return
+      }
+      if (password.length < 10) {
+        res.status(400).json({ error: 'Your password must be at least 10 characters long.' })
+        return
+      }
+      if (Buffer.byteLength(password, 'utf8') > 72) {
+        res.status(400).json({ error: 'Your password must be no more than 72 UTF-8 bytes.' })
+        return
+      }
+      if (password !== confirmPassword) {
+        res.status(400).json({ error: 'Your passwords do not match.' })
+        return
+      }
+      if (!csrfMatches(setupCode, submittedCode)) {
+        res.status(403).json({ error: 'The setup code is incorrect.' })
         return
       }
 
-      req.session.regenerate((error) => {
-        if (error) {
-          next(error)
-          return
-        }
-        req.session.admin = { email: adminEmail, name: adminName, role: 'admin' }
-        req.session.csrfToken = randomBytes(32).toString('hex')
-        req.session.save((saveError) => {
-          if (saveError) {
-            next(saveError)
-            return
-          }
-          res.json({ user: req.session.admin, csrfToken: req.session.csrfToken })
-        })
+      const passwordHash = await bcrypt.hash(password, 12)
+      const createAdmin = db.transaction(() => {
+        if (db.prepare('SELECT 1 FROM admin_account WHERE id = 1').get()) return false
+        db.prepare('INSERT INTO admin_account (id, name, email, password_hash) VALUES (1, ?, ?, ?)')
+          .run(name, email, passwordHash)
+        return true
       })
+      if (!createAdmin.immediate()) {
+        res.status(403).json({ error: 'An admin account has already been created.' })
+        return
+      }
+      ensureWorkspaceBootstrap(db, { adminEmail: email, adminName: name, passwordHash, orgName, orgSlug })
+      signAdminIn(req, res, next, { email, name })
+    } catch (error) {
+      next(error)
+    }
+  })
+
+  router.post('/auth/login', authLimiter, verifyCsrf, async (req, res, next) => {
+    try {
+      const email = typeof req.body?.email === 'string' ? req.body.email.trim().toLowerCase() : ''
+      const password = typeof req.body?.password === 'string' ? req.body.password : ''
+      const admin = db.prepare('SELECT name, email, password_hash FROM admin_account WHERE id = 1').get()
+      const passwordMatches = admin && await bcrypt.compare(password, admin.password_hash)
+      if (!admin || !email || email !== admin.email || !passwordMatches) {
+        res.status(401).json({ error: 'Invalid email or password.' })
+        return
+      }
+      signAdminIn(req, res, next, admin)
     } catch (error) {
       next(error)
     }
@@ -389,7 +447,10 @@ export function createApp({
 
       const existingUser = db.prepare('SELECT * FROM users WHERE lower(email) = ?').get(email)
       if (existingUser) {
-        const expectedHash = existingUser.password_hash || (email === adminEmail.toLowerCase() ? passwordHash : null)
+        const storedAdmin = !existingUser.password_hash
+          ? db.prepare('SELECT email, password_hash FROM admin_account WHERE id = 1').get()
+          : null
+        const expectedHash = existingUser.password_hash || (storedAdmin && email === storedAdmin.email ? storedAdmin.password_hash : null)
         if (expectedHash) {
           const matches = await bcrypt.compare(password, expectedHash)
           if (!matches) {

@@ -26,6 +26,9 @@ export default function AdminDashboard() {
   const [loginPassword, setLoginPassword] = useState('')
   const [loginError, setLoginError] = useState('')
   const [loginLoading, setLoginLoading] = useState(false)
+  const [setupForm, setSetupForm] = useState({ name: '', email: '', password: '', confirmPassword: '', setupCode: '' })
+  const [setupError, setSetupError] = useState('')
+  const [setupLoading, setSetupLoading] = useState(false)
   const [apiError, setApiError] = useState('')
   const [summary, setSummary] = useState({ totalStudents: 0, totalQuestions: 0, weeklyActivity: [] })
   const [mentees, setMentees] = useState([])
@@ -56,9 +59,16 @@ export default function AdminDashboard() {
     let active = true
     async function initialize() {
       try {
-        const { csrfToken: token } = await requestCsrfToken()
+        const [{ csrfToken: token }, { setupRequired }] = await Promise.all([
+          requestCsrfToken(),
+          apiRequest('/auth/status'),
+        ])
         if (!active) return
         setCsrfToken(token)
+        if (setupRequired) {
+          setAuthStatus('setup-required')
+          return
+        }
         try {
           const { user } = await apiRequest('/auth/me')
           const data = await loadDashboardData()
@@ -265,6 +275,30 @@ export default function AdminDashboard() {
       setLoginError(error.message)
     } finally {
       setLoginLoading(false)
+    }
+  }
+
+  async function handleSetup(event) {
+    event.preventDefault()
+    setSetupLoading(true)
+    setSetupError('')
+    setApiError('')
+    try {
+      const { user, csrfToken: token } = await apiRequest('/auth/setup', {
+        method: 'POST',
+        body: setupForm,
+        csrfToken,
+      })
+      cacheCsrfToken(token)
+      setCsrfToken(token)
+      setAdmin(user)
+      applyDashboardData(await loadDashboardData())
+      setSetupForm({ name: '', email: '', password: '', confirmPassword: '', setupCode: '' })
+      setAuthStatus('authenticated')
+    } catch (error) {
+      setSetupError(error.message)
+    } finally {
+      setSetupLoading(false)
     }
   }
 
@@ -520,7 +554,21 @@ export default function AdminDashboard() {
   }
 
   if (authStatus !== 'authenticated') {
-    return <AdminLoginScreen email={loginEmail} password={loginPassword} error={loginError || apiError} loading={loginLoading} onEmailChange={setLoginEmail} onPasswordChange={setLoginPassword} onSubmit={handleLogin} />
+    return <AdminLoginScreen
+      setupRequired={authStatus === 'setup-required'}
+      email={loginEmail}
+      password={loginPassword}
+      setupForm={setupForm}
+      error={authStatus === 'setup-required' ? setupError || apiError : loginError || apiError}
+      loading={authStatus === 'setup-required' ? setupLoading : loginLoading}
+      onEmailChange={setLoginEmail}
+      onPasswordChange={setLoginPassword}
+      onSetupFormChange={(field, value) => {
+        setSetupForm((current) => ({ ...current, [field]: value }))
+        setSetupError('')
+      }}
+      onSubmit={authStatus === 'setup-required' ? handleSetup : handleLogin}
+    />
   }
 
   return (
