@@ -89,6 +89,14 @@ export function createDatabase(filename) {
       title TEXT NOT NULL,
       description TEXT NOT NULL DEFAULT '',
       max_attempts INTEGER NOT NULL DEFAULT 3 CHECK (max_attempts BETWEEN 1 AND 3),
+      time_limit_minutes INTEGER,
+      available_from TEXT,
+      available_until TEXT,
+      shuffle_questions INTEGER NOT NULL DEFAULT 0 CHECK (shuffle_questions IN (0, 1)),
+      shuffle_options INTEGER NOT NULL DEFAULT 0 CHECK (shuffle_options IN (0, 1)),
+      navigation_mode TEXT NOT NULL DEFAULT 'free' CHECK (navigation_mode IN ('free', 'sequential')),
+      feedback_policy TEXT NOT NULL DEFAULT 'immediate' CHECK (feedback_policy IN ('immediate', 'after_deadline', 'manual')),
+      results_released INTEGER NOT NULL DEFAULT 0 CHECK (results_released IN (0, 1)),
       status TEXT NOT NULL DEFAULT 'Draft' CHECK (status IN ('Draft', 'Published', 'Paused')),
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
@@ -114,10 +122,28 @@ export function createDatabase(filename) {
       grading_status TEXT NOT NULL DEFAULT 'Graded',
       earned_points REAL NOT NULL DEFAULT 0,
       max_points REAL NOT NULL DEFAULT 0,
+      status TEXT NOT NULL DEFAULT 'submitted' CHECK (status IN ('in_progress', 'submitted', 'expired')),
+      started_at TEXT,
+      expires_at TEXT,
+      draft_answers_json TEXT NOT NULL DEFAULT '{}',
+      question_order_json TEXT NOT NULL DEFAULT '[]',
+      option_orders_json TEXT NOT NULL DEFAULT '{}',
+      last_saved_at TEXT,
       submitted_at TEXT NOT NULL
     );
     CREATE INDEX IF NOT EXISTS assessment_attempts_lookup_idx
       ON assessment_attempts (assessment_id, mentee_id, submitted_at);
+    CREATE TABLE IF NOT EXISTS extra_attempt_grants (
+      id TEXT PRIMARY KEY,
+      assessment_id TEXT NOT NULL REFERENCES assessments(id) ON DELETE CASCADE,
+      mentee_id TEXT NOT NULL REFERENCES mentees(id) ON DELETE CASCADE,
+      extra_attempts INTEGER NOT NULL DEFAULT 1 CHECK (extra_attempts BETWEEN 1 AND 5),
+      reason TEXT NOT NULL,
+      granted_by TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS extra_attempt_grants_lookup_idx
+      ON extra_attempt_grants (assessment_id, mentee_id, created_at);
     CREATE TABLE IF NOT EXISTS sessions (
       sid TEXT PRIMARY KEY,
       data TEXT NOT NULL,
@@ -193,6 +219,21 @@ export function createDatabase(filename) {
   ensureColumn('assessment_attempts', 'grading_status', "TEXT NOT NULL DEFAULT 'Graded'")
   ensureColumn('assessment_attempts', 'earned_points', 'REAL NOT NULL DEFAULT 0')
   ensureColumn('assessment_attempts', 'max_points', 'REAL NOT NULL DEFAULT 0')
+  ensureColumn('assessment_attempts', 'status', "TEXT NOT NULL DEFAULT 'submitted'")
+  ensureColumn('assessment_attempts', 'started_at', 'TEXT')
+  ensureColumn('assessment_attempts', 'expires_at', 'TEXT')
+  ensureColumn('assessment_attempts', 'draft_answers_json', "TEXT NOT NULL DEFAULT '{}'")
+  ensureColumn('assessment_attempts', 'question_order_json', "TEXT NOT NULL DEFAULT '[]'")
+  ensureColumn('assessment_attempts', 'option_orders_json', "TEXT NOT NULL DEFAULT '{}'")
+  ensureColumn('assessment_attempts', 'last_saved_at', 'TEXT')
+  ensureColumn('assessments', 'time_limit_minutes', 'INTEGER')
+  ensureColumn('assessments', 'available_from', 'TEXT')
+  ensureColumn('assessments', 'available_until', 'TEXT')
+  ensureColumn('assessments', 'shuffle_questions', 'INTEGER NOT NULL DEFAULT 0')
+  ensureColumn('assessments', 'shuffle_options', 'INTEGER NOT NULL DEFAULT 0')
+  ensureColumn('assessments', 'navigation_mode', "TEXT NOT NULL DEFAULT 'free'")
+  ensureColumn('assessments', 'feedback_policy', "TEXT NOT NULL DEFAULT 'immediate'")
+  ensureColumn('assessments', 'results_released', 'INTEGER NOT NULL DEFAULT 0')
 
   const seed = db.transaction(() => {
     if (db.prepare('SELECT COUNT(*) AS count FROM questions').get().count === 0) {
@@ -329,11 +370,25 @@ export function menteeFromRow(row) {
 }
 
 export function assessmentFromRow(db, row) {
+  const grants = db.prepare(`
+    SELECT id, mentee_id AS menteeId, extra_attempts AS extraAttempts, reason, granted_by AS grantedBy, created_at AS createdAt
+    FROM extra_attempt_grants
+    WHERE assessment_id = ?
+    ORDER BY created_at DESC
+  `).all(row.id)
   return {
     id: row.id,
     title: row.title,
     description: row.description,
     maxAttempts: row.max_attempts,
+    timeLimitMinutes: row.time_limit_minutes ?? null,
+    availableFrom: row.available_from || null,
+    availableUntil: row.available_until || null,
+    shuffleQuestions: Boolean(row.shuffle_questions),
+    shuffleOptions: Boolean(row.shuffle_options),
+    navigationMode: row.navigation_mode || 'free',
+    feedbackPolicy: row.feedback_policy || 'immediate',
+    resultsReleased: Boolean(row.results_released),
     status: row.status,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
@@ -345,6 +400,7 @@ export function assessmentFromRow(db, row) {
       SELECT mentee_id FROM assessment_assignments
       WHERE assessment_id = ? ORDER BY assigned_at, mentee_id
     `).all(row.id).map((assignment) => assignment.mentee_id),
+    extraAttemptGrants: grants,
   }
 }
 

@@ -429,3 +429,58 @@
     text-align: left;
   }
 }
+
+.assessment-delivery-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 9px;
+}
+
+.assessment-delivery-tags span {
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: #f3f4fa;
+  color: #64677b;
+  font-size: 9px;
+  font-weight: 600;
+}
+
+.assessment-window-meta,
+.assessment-grants-count {
+  display: block;
+  margin-top: 5px;
+  color: #77798b;
+  font-size: 9px;
+}
+
+.assessment-rules-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  margin: 12px 0;
+}
+
+.assessment-toggles {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+  margin-bottom: 14px;
+}
+
+.extra-grants-history {
+  display: grid;
+  gap: 4px;
+  margin-top: 10px;
+  padding: 10px;
+  border-radius: 7px;
+  background: #f7f8fc;
+  font-size: 10px;
+  color: #55576b;
+}
+
+@media (max-width: 600px) {
+  .assessment-rules-grid {
+    grid-template-columns: 1fr;
+  }
+}

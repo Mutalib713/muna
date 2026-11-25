@@ -1,5 +1,5 @@
 import { Buffer } from 'node:buffer'
-import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto'
+import { createHash, randomBytes, randomInt, randomUUID, timingSafeEqual } from 'node:crypto'
 import { existsSync } from 'node:fs'
 import path from 'node:path'
 import bcrypt from 'bcryptjs'
@@ -64,6 +64,17 @@ function requireAdmin(req, res, next) {
   next()
 }
 
+const NAVIGATION_MODES = ['free', 'sequential']
+const FEEDBACK_POLICIES = ['immediate', 'after_deadline', 'manual']
+
+function parseOptionalIsoDate(value) {
+  if (value === undefined || value === null || value === '') return null
+  if (typeof value !== 'string') return false
+  const ms = Date.parse(value)
+  if (!Number.isFinite(ms)) return false
+  return new Date(ms).toISOString()
+}
+
 function validateAssessment(input) {
   if (!input || typeof input !== 'object' || Array.isArray(input)) return 'Assessment details are required.'
   const title = typeof input.title === 'string' ? input.title.trim() : ''
@@ -85,7 +96,51 @@ function validateAssessment(input) {
   if (!Number.isInteger(maxAttempts) || maxAttempts < 1 || maxAttempts > 3) {
     return 'Maximum attempts must be between 1 and 3.'
   }
+  if (input.timeLimitMinutes !== undefined && input.timeLimitMinutes !== null && input.timeLimitMinutes !== '') {
+    const minutes = Number(input.timeLimitMinutes)
+    if (!Number.isInteger(minutes) || minutes < 1 || minutes > 300) {
+      return 'Time limit must be between 1 and 300 minutes.'
+    }
+  }
+  const availableFrom = parseOptionalIsoDate(input.availableFrom)
+  const availableUntil = parseOptionalIsoDate(input.availableUntil)
+  if (availableFrom === false || availableUntil === false) {
+    return 'Availability dates must be valid timestamps.'
+  }
+  if (availableFrom && availableUntil && Date.parse(availableUntil) <= Date.parse(availableFrom)) {
+    return 'Availability end date must be after the start date.'
+  }
+  const navigationMode = input.navigationMode ?? 'free'
+  if (!NAVIGATION_MODES.includes(navigationMode)) {
+    return 'Navigation mode must be free or sequential.'
+  }
+  const feedbackPolicy = input.feedbackPolicy ?? 'immediate'
+  if (!FEEDBACK_POLICIES.includes(feedbackPolicy)) {
+    return 'Feedback policy must be immediate, after_deadline, or manual.'
+  }
+  if (feedbackPolicy === 'after_deadline' && !availableUntil) {
+    return 'Set an availability end date to release feedback after the deadline.'
+  }
   return null
+}
+
+function normalizeAssessmentSettings(input) {
+  const timeLimitMinutes =
+    input.timeLimitMinutes === undefined || input.timeLimitMinutes === null || input.timeLimitMinutes === ''
+      ? null
+      : Number(input.timeLimitMinutes)
+  return {
+    title: input.title.trim(),
+    description: (input.description || '').trim(),
+    maxAttempts: input.maxAttempts ?? 3,
+    timeLimitMinutes,
+    availableFrom: parseOptionalIsoDate(input.availableFrom),
+    availableUntil: parseOptionalIsoDate(input.availableUntil),
+    shuffleQuestions: input.shuffleQuestions ? 1 : 0,
+    shuffleOptions: input.shuffleOptions ? 1 : 0,
+    navigationMode: input.navigationMode ?? 'free',
+    feedbackPolicy: input.feedbackPolicy ?? 'immediate',
+  }
 }
 
 const INVITABLE_ROLES = ['Admin', 'Mentor', 'Mentee']
@@ -567,6 +622,208 @@ export function createApp({
 
   router.use(requireAdmin)
 
+  function shuffleList(items) {
+    const copy = [...items]
+    for (let i = copy.length - 1; i > 0; i--) {
+      const j = randomInt(0, i + 1)
+      ;[copy[i], copy[j]] = [copy[j], copy[i]]
+    }
+    return copy
+  }
+
+  function getAvailabilityState(assessment, nowMs = Date.now()) {
+    if (assessment.available_from && nowMs < Date.parse(assessment.available_from)) return 'upcoming'
+    if (assessment.available_until && nowMs > Date.parse(assessment.available_until)) return 'closed'
+    return 'open'
+  }
+
+  function resultsAreVisible(assessment, nowMs = Date.now()) {
+    const policy = assessment.feedback_policy || 'immediate'
+    if (policy === 'immediate') return true
+    if (policy === 'after_deadline') {
+      return Boolean(assessment.available_until && nowMs > Date.parse(assessment.available_until))
+    }
+    return Boolean(assessment.results_released)
+  }
+
+  function getAttemptAllowance(assessment, menteeId) {
+    const extra = db.prepare(`
+      SELECT COALESCE(SUM(extra_attempts), 0) AS total
+      FROM extra_attempt_grants
+      WHERE assessment_id = ? AND mentee_id = ?
+    `).get(assessment.id, menteeId).total
+    return {
+      baseAttempts: assessment.max_attempts,
+      extraAttempts: extra,
+      allowedAttempts: assessment.max_attempts + extra,
+    }
+  }
+
+  function getOrderedLearnerQuestions(assessmentId, activeAttempt = null) {
+    const rows = db.prepare(`
+      SELECT q.* FROM assessment_questions aq
+      JOIN questions q ON q.id = aq.question_id
+      WHERE aq.assessment_id = ? ORDER BY aq.position
+    `).all(assessmentId)
+    const byId = new Map(rows.map((row) => [row.id, sanitizeQuestionForLearner(questionFromRow(row))]))
+    let orderedIds = rows.map((row) => row.id)
+    let optionOrders = {}
+    if (activeAttempt) {
+      try {
+        const parsedOrder = JSON.parse(activeAttempt.question_order_json || '[]')
+        if (Array.isArray(parsedOrder) && parsedOrder.length > 0) {
+          orderedIds = parsedOrder.filter((id) => byId.has(id))
+        }
+      } catch {
+        // ignore malformed json
+      }
+      try {
+        optionOrders = JSON.parse(activeAttempt.option_orders_json || '{}') || {}
+      } catch {
+        optionOrders = {}
+      }
+    }
+    return orderedIds.map((id) => {
+      const q = { ...byId.get(id) }
+      if (Array.isArray(optionOrders[id]) && optionOrders[id].length === q.options.length) {
+        q.options = optionOrders[id]
+      }
+      return q
+    })
+  }
+
+  function finalizeAttemptRecord({
+    assessment,
+    mentee,
+    submittedAnswers,
+    existingAttempt = null,
+    status = 'submitted',
+    submittedAt = new Date().toISOString(),
+    allowPartial = false,
+  }) {
+    const questionRows = db.prepare(`
+      SELECT q.* FROM assessment_questions aq
+      JOIN questions q ON q.id = aq.question_id
+      WHERE aq.assessment_id = ? ORDER BY aq.position
+    `).all(assessment.id)
+
+    const gradedItems = []
+    for (const row of questionRows) {
+      const question = questionFromRow(row)
+      const rawResponse = submittedAnswers?.[question.id]
+      const graded = gradeQuestionResponse(question, rawResponse)
+      if (graded.error) {
+        if (!allowPartial) {
+          return { error: graded.error }
+        }
+        const manualType = question.type === 'theory' || question.type === 'drawing' ||
+          (question.type === 'short_answer' && (question.acceptedAnswers?.length ?? 0) === 0)
+        gradedItems.push({
+          questionId: question.id,
+          type: question.type,
+          prompt: question.prompt,
+          maxPoints: Number(question.points ?? 1),
+          rubric: question.rubric || [],
+          response: rawResponse ?? null,
+          summaryText: '(No answer saved)',
+          earnedPoints: 0,
+          autoGraded: !manualType,
+          needsReview: manualType,
+        })
+      } else {
+        gradedItems.push(graded)
+      }
+    }
+
+    const earnedPoints = Math.round(gradedItems.reduce((sum, item) => sum + item.earnedPoints, 0) * 100) / 100
+    const maxPoints = Math.round(gradedItems.reduce((sum, item) => sum + item.maxPoints, 0) * 100) / 100
+    const needsManualGrading = gradedItems.some((item) => item.needsReview)
+    const gradingStatus = needsManualGrading ? 'Needs manual grading' : 'Graded'
+    const score = `${formatPoints(earnedPoints)} / ${formatPoints(maxPoints)}`
+    const attemptId = existingAttempt?.id || `AT-${randomUUID().slice(0, 8).toUpperCase()}`
+    const answerId = `A-${randomUUID().slice(0, 8).toUpperCase()}`
+    const answerSummary = gradedItems.map((item) => `${item.prompt}: ${item.summaryText}`).join('\n')
+    const storedAnswers = gradedItems.map((item) => ({
+      questionId: item.questionId,
+      type: item.type,
+      response: item.response,
+      earnedPoints: item.earnedPoints,
+      maxPoints: item.maxPoints,
+      needsReview: item.needsReview,
+    }))
+
+    if (existingAttempt) {
+      db.prepare(`
+        UPDATE assessment_attempts
+        SET answers_json = ?, score = ?, grading_status = ?, earned_points = ?, max_points = ?,
+            status = ?, submitted_at = ?
+        WHERE id = ?
+      `).run(JSON.stringify(storedAnswers), score, gradingStatus, earnedPoints, maxPoints, status, submittedAt, attemptId)
+    } else {
+      db.prepare(`
+        INSERT INTO assessment_attempts (
+          id, assessment_id, mentee_id, answers_json, score, grading_status, earned_points, max_points,
+          status, started_at, submitted_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(attemptId, assessment.id, mentee.id, JSON.stringify(storedAnswers), score, gradingStatus, earnedPoints, maxPoints, status, submittedAt, submittedAt)
+    }
+
+    db.prepare(`
+      INSERT INTO answers (
+        id, attempt_id, student, initials, assessment, answer, score,
+        earned_points, max_points, items_json, submitted_at, status
+      )
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Needs review')
+    `).run(
+      answerId,
+      attemptId,
+      mentee.name,
+      initialsFor(mentee.name),
+      assessment.title,
+      answerSummary,
+      score,
+      earnedPoints,
+      maxPoints,
+      JSON.stringify(gradedItems),
+      submittedAt,
+    )
+
+    return {
+      attempt: {
+        id: attemptId,
+        status,
+        score,
+        earnedPoints,
+        maxPoints,
+        gradingStatus,
+        needsManualGrading,
+        submittedAt,
+      },
+    }
+  }
+
+  function expireOverdueAttemptIfNeeded(assessment, mentee, attempt) {
+    if (!attempt || attempt.status !== 'in_progress' || !attempt.expires_at) return null
+    if (Date.now() < Date.parse(attempt.expires_at)) return null
+    let draftAnswers = {}
+    try {
+      draftAnswers = JSON.parse(attempt.draft_answers_json || '{}') || {}
+    } catch {
+      draftAnswers = {}
+    }
+    const tx = db.transaction(() => finalizeAttemptRecord({
+      assessment,
+      mentee,
+      submittedAnswers: draftAnswers,
+      existingAttempt: attempt,
+      status: 'expired',
+      submittedAt: attempt.expires_at,
+      allowPartial: true,
+    }))
+    return tx.immediate()
+  }
+
   router.get('/learner/assessments/:menteeId', (req, res) => {
     const mentee = db.prepare('SELECT * FROM mentees WHERE id = ?').get(req.params.menteeId)
     if (!mentee) {
@@ -581,28 +838,261 @@ export function createApp({
     `).all(req.params.menteeId)
     res.json({
       assessments: rows.map((row) => {
-        const questionIds = db.prepare(`
-          SELECT question_id FROM assessment_questions
-          WHERE assessment_id = ? ORDER BY position
-        `).all(row.id).map((item) => item.question_id)
-        const questions = questionIds.map((id) => {
-          const question = db.prepare('SELECT * FROM questions WHERE id = ?').get(id)
-          return sanitizeQuestionForLearner(questionFromRow(question))
-        })
+        const inProgress = db.prepare(`
+          SELECT * FROM assessment_attempts
+          WHERE assessment_id = ? AND mentee_id = ? AND status = 'in_progress'
+          ORDER BY started_at DESC LIMIT 1
+        `).get(row.id, req.params.menteeId)
+        if (inProgress) {
+          expireOverdueAttemptIfNeeded(row, mentee, inProgress)
+        }
+        const activeAttemptRow = db.prepare(`
+          SELECT * FROM assessment_attempts
+          WHERE assessment_id = ? AND mentee_id = ? AND status = 'in_progress'
+          ORDER BY started_at DESC LIMIT 1
+        `).get(row.id, req.params.menteeId)
+        const latestRow = db.prepare(`
+          SELECT * FROM assessment_attempts
+          WHERE assessment_id = ? AND mentee_id = ? AND status != 'in_progress'
+          ORDER BY submitted_at DESC LIMIT 1
+        `).get(row.id, req.params.menteeId)
         const attemptCount = db.prepare(`
           SELECT COUNT(*) AS count FROM assessment_attempts
           WHERE assessment_id = ? AND mentee_id = ?
         `).get(row.id, req.params.menteeId).count
+        const allowance = getAttemptAllowance(row, req.params.menteeId)
+        const showResults = resultsAreVisible(row)
+        let draftAnswers = {}
+        if (activeAttemptRow) {
+          try {
+            draftAnswers = JSON.parse(activeAttemptRow.draft_answers_json || '{}') || {}
+          } catch {
+            draftAnswers = {}
+          }
+        }
         return {
           id: row.id,
           title: row.title,
           description: row.description,
-          maxAttempts: row.max_attempts,
+          maxAttempts: allowance.allowedAttempts,
+          baseMaxAttempts: allowance.baseAttempts,
+          extraAttempts: allowance.extraAttempts,
           attemptCount,
-          questions,
+          timeLimitMinutes: row.time_limit_minutes ?? null,
+          availableFrom: row.available_from || null,
+          availableUntil: row.available_until || null,
+          availabilityState: getAvailabilityState(row),
+          shuffleQuestions: Boolean(row.shuffle_questions),
+          shuffleOptions: Boolean(row.shuffle_options),
+          navigationMode: row.navigation_mode || 'free',
+          feedbackPolicy: row.feedback_policy || 'immediate',
+          resultsVisible: showResults,
+          activeAttempt: activeAttemptRow ? {
+            id: activeAttemptRow.id,
+            startedAt: activeAttemptRow.started_at,
+            expiresAt: activeAttemptRow.expires_at || null,
+            lastSavedAt: activeAttemptRow.last_saved_at || null,
+            draftAnswers,
+          } : null,
+          latestSubmission: latestRow ? {
+            id: latestRow.id,
+            status: latestRow.status,
+            submittedAt: latestRow.submitted_at,
+            resultsVisible: showResults,
+            score: showResults ? latestRow.score : null,
+            needsManualGrading: latestRow.grading_status === 'Needs manual grading',
+          } : null,
+          questions: getOrderedLearnerQuestions(row.id, activeAttemptRow),
         }
       }),
     })
+  })
+
+  router.post('/learner/assessments/:id/start', (req, res) => {
+    const menteeId = typeof req.body?.menteeId === 'string' ? req.body.menteeId : ''
+    const startTx = db.transaction(() => {
+      const assessment = db.prepare('SELECT * FROM assessments WHERE id = ?').get(req.params.id)
+      if (!assessment) return { statusCode: 404, error: 'Assessment not found.' }
+      if (assessment.status !== 'Published') return { statusCode: 400, error: 'This assessment is not accepting attempts.' }
+      const assignment = db.prepare(`
+        SELECT 1 FROM assessment_assignments WHERE assessment_id = ? AND mentee_id = ?
+      `).get(req.params.id, menteeId)
+      const mentee = db.prepare('SELECT * FROM mentees WHERE id = ?').get(menteeId)
+      if (!assignment || !mentee) return { statusCode: 403, error: 'This assessment is not assigned to the mentee.' }
+
+      const availability = getAvailabilityState(assessment)
+      if (availability === 'upcoming') {
+        return { statusCode: 403, error: 'This assessment is not open yet.' }
+      }
+      if (availability === 'closed') {
+        return { statusCode: 403, error: 'The availability window for this assessment has closed.' }
+      }
+
+      const existingActive = db.prepare(`
+        SELECT * FROM assessment_attempts
+        WHERE assessment_id = ? AND mentee_id = ? AND status = 'in_progress'
+        ORDER BY started_at DESC LIMIT 1
+      `).get(req.params.id, menteeId)
+      if (existingActive) {
+        let parsedDraft
+        try {
+          parsedDraft = JSON.parse(existingActive.draft_answers_json || '{}') || {}
+        } catch {
+          parsedDraft = {}
+        }
+        if (!existingActive.expires_at || Date.now() < Date.parse(existingActive.expires_at)) {
+          return {
+            statusCode: 200,
+            resumed: true,
+            attempt: {
+              id: existingActive.id,
+              startedAt: existingActive.started_at,
+              expiresAt: existingActive.expires_at || null,
+              lastSavedAt: existingActive.last_saved_at || null,
+              draftAnswers: parsedDraft,
+            },
+            questions: getOrderedLearnerQuestions(assessment.id, existingActive),
+          }
+        }
+        // Overdue: auto-finalize before checking remaining allowance
+        finalizeAttemptRecord({
+          assessment,
+          mentee,
+          submittedAnswers: parsedDraft,
+          existingAttempt: existingActive,
+          status: 'expired',
+          submittedAt: existingActive.expires_at,
+          allowPartial: true,
+        })
+      }
+
+      const usedCount = db.prepare(`
+        SELECT COUNT(*) AS count FROM assessment_attempts
+        WHERE assessment_id = ? AND mentee_id = ?
+      `).get(req.params.id, menteeId).count
+      const allowance = getAttemptAllowance(assessment, menteeId)
+      if (usedCount >= allowance.allowedAttempts) {
+        return { statusCode: 409, error: 'The maximum number of attempts has been reached.' }
+      }
+
+      const questionRows = db.prepare(`
+        SELECT q.* FROM assessment_questions aq
+        JOIN questions q ON q.id = aq.question_id
+        WHERE aq.assessment_id = ? ORDER BY aq.position
+      `).all(assessment.id)
+      const baseIds = questionRows.map((q) => q.id)
+      const questionOrder = assessment.shuffle_questions ? shuffleList(baseIds) : baseIds
+      const optionOrders = {}
+      if (assessment.shuffle_options) {
+        for (const row of questionRows) {
+          const parsed = questionFromRow(row)
+          if (parsed.type === 'mcq' || parsed.type === 'multi_select') {
+            optionOrders[parsed.id] = shuffleList(parsed.options)
+          }
+        }
+      }
+
+      const nowMs = Date.now()
+      const startedAt = new Date(nowMs).toISOString()
+      let expiresAt = null
+      if (assessment.time_limit_minutes) {
+        let endMs = nowMs + assessment.time_limit_minutes * 60 * 1000
+        if (assessment.available_until) {
+          endMs = Math.min(endMs, Date.parse(assessment.available_until))
+        }
+        expiresAt = new Date(endMs).toISOString()
+      } else if (assessment.available_until) {
+        expiresAt = assessment.available_until
+      }
+
+      const attemptId = `AT-${randomUUID().slice(0, 8).toUpperCase()}`
+      db.prepare(`
+        INSERT INTO assessment_attempts (
+          id, assessment_id, mentee_id, answers_json, score, grading_status, earned_points, max_points,
+          status, started_at, expires_at, draft_answers_json, question_order_json, option_orders_json,
+          last_saved_at, submitted_at
+        )
+        VALUES (?, ?, ?, '[]', '0 / 0', 'Graded', 0, 0, 'in_progress', ?, ?, '{}', ?, ?, ?, '')
+      `).run(
+        attemptId,
+        assessment.id,
+        menteeId,
+        startedAt,
+        expiresAt,
+        JSON.stringify(questionOrder),
+        JSON.stringify(optionOrders),
+        startedAt,
+      )
+
+      const createdRow = db.prepare('SELECT * FROM assessment_attempts WHERE id = ?').get(attemptId)
+      return {
+        statusCode: 201,
+        resumed: false,
+        attempt: {
+          id: attemptId,
+          startedAt,
+          expiresAt,
+          lastSavedAt: startedAt,
+          draftAnswers: {},
+        },
+        questions: getOrderedLearnerQuestions(assessment.id, createdRow),
+      }
+    })
+
+    const outcome = startTx.immediate()
+    if (outcome.error) {
+      res.status(outcome.statusCode).json({ error: outcome.error })
+      return
+    }
+    res.status(outcome.statusCode).json({
+      attempt: outcome.attempt,
+      questions: outcome.questions,
+      resumed: outcome.resumed,
+    })
+  })
+
+  router.put('/learner/attempts/:attemptId/responses', (req, res) => {
+    const menteeId = typeof req.body?.menteeId === 'string' ? req.body.menteeId : ''
+    const answers = req.body?.answers
+    if (!answers || typeof answers !== 'object' || Array.isArray(answers)) {
+      res.status(400).json({ error: 'Answers object is required.' })
+      return
+    }
+    const attempt = db.prepare('SELECT * FROM assessment_attempts WHERE id = ?').get(req.params.attemptId)
+    if (!attempt || attempt.mentee_id !== menteeId) {
+      res.status(404).json({ error: 'Active attempt not found.' })
+      return
+    }
+    const assessment = db.prepare('SELECT * FROM assessments WHERE id = ?').get(attempt.assessment_id)
+    const mentee = db.prepare('SELECT * FROM mentees WHERE id = ?').get(menteeId)
+    if (!assessment || !mentee) {
+      res.status(404).json({ error: 'Assessment not found.' })
+      return
+    }
+    const expired = expireOverdueAttemptIfNeeded(assessment, mentee, attempt)
+    if (expired) {
+      const showResults = resultsAreVisible(assessment)
+      res.status(409).json({
+        error: 'Time expired. Your last saved responses were automatically submitted.',
+        expired: true,
+        attempt: {
+          ...expired.attempt,
+          score: showResults ? expired.attempt.score : null,
+          resultsVisible: showResults,
+        },
+      })
+      return
+    }
+    if (attempt.status !== 'in_progress') {
+      res.status(409).json({ error: 'This attempt has already been submitted.' })
+      return
+    }
+    const now = new Date().toISOString()
+    db.prepare(`
+      UPDATE assessment_attempts SET draft_answers_json = ?, last_saved_at = ?
+      WHERE id = ? AND status = 'in_progress'
+    `).run(JSON.stringify(answers), now, attempt.id)
+    res.json({ ok: true, lastSavedAt: now })
   })
 
   router.post('/learner/assessments/:id/attempts', (req, res) => {
@@ -625,90 +1115,98 @@ export function createApp({
       res.status(403).json({ error: 'This assessment is not assigned to the mentee.' })
       return
     }
-    const attemptCount = db.prepare(`
-      SELECT COUNT(*) AS count FROM assessment_attempts
-      WHERE assessment_id = ? AND mentee_id = ?
-    `).get(req.params.id, menteeId).count
-    if (attemptCount >= assessment.max_attempts) {
-      res.status(409).json({ error: 'The maximum number of attempts has been reached.' })
-      return
-    }
     const submittedAnswers = req.body?.answers
     if (!submittedAnswers || typeof submittedAnswers !== 'object' || Array.isArray(submittedAnswers)) {
       res.status(400).json({ error: 'Submitted answers are required.' })
       return
     }
-    const questionRows = db.prepare(`
-      SELECT q.* FROM assessment_questions aq
-      JOIN questions q ON q.id = aq.question_id
-      WHERE aq.assessment_id = ? ORDER BY aq.position
-    `).all(req.params.id)
-    const gradedItems = []
-    for (const row of questionRows) {
-      const question = questionFromRow(row)
-      const graded = gradeQuestionResponse(question, submittedAnswers[question.id])
-      if (graded.error) {
-        res.status(400).json({ error: graded.error })
-        return
+    const attemptIdParam = typeof req.body?.attemptId === 'string' ? req.body.attemptId : ''
+    const allowAutoExpiry = Boolean(req.body?.autoExpired)
+
+    const submitTx = db.transaction(() => {
+      if (attemptIdParam) {
+        const existingAttempt = db.prepare(`
+          SELECT * FROM assessment_attempts WHERE id = ? AND assessment_id = ? AND mentee_id = ?
+        `).get(attemptIdParam, assessment.id, menteeId)
+        if (!existingAttempt) {
+          return { statusCode: 404, error: 'Attempt not found.' }
+        }
+        if (existingAttempt.status !== 'in_progress') {
+          return { statusCode: 409, error: 'This attempt has already been submitted.' }
+        }
+        const overdue = existingAttempt.expires_at && Date.now() > Date.parse(existingAttempt.expires_at) + 5000
+        let finalAnswers = submittedAnswers
+        if (overdue) {
+          try {
+            finalAnswers = JSON.parse(existingAttempt.draft_answers_json || '{}') || submittedAnswers
+          } catch {
+            finalAnswers = submittedAnswers
+          }
+        }
+        const finalized = finalizeAttemptRecord({
+          assessment,
+          mentee,
+          submittedAnswers: finalAnswers,
+          existingAttempt,
+          status: overdue || allowAutoExpiry ? 'expired' : 'submitted',
+          submittedAt: new Date().toISOString(),
+          allowPartial: overdue || allowAutoExpiry,
+        })
+        if (finalized.error) return { statusCode: 400, error: finalized.error }
+        const attemptCount = db.prepare(`
+          SELECT COUNT(*) AS count FROM assessment_attempts
+          WHERE assessment_id = ? AND mentee_id = ?
+        `).get(assessment.id, menteeId).count
+        return { statusCode: 201, attempt: finalized.attempt, attemptCount }
       }
-      gradedItems.push(graded)
-    }
-    const earnedPoints = Math.round(gradedItems.reduce((sum, item) => sum + item.earnedPoints, 0) * 100) / 100
-    const maxPoints = Math.round(gradedItems.reduce((sum, item) => sum + item.maxPoints, 0) * 100) / 100
-    const needsManualGrading = gradedItems.some((item) => item.needsReview)
-    const gradingStatus = needsManualGrading ? 'Needs manual grading' : 'Graded'
-    const score = `${formatPoints(earnedPoints)} / ${formatPoints(maxPoints)}`
-    const now = new Date().toISOString()
-    const attemptId = `AT-${randomUUID().slice(0, 8).toUpperCase()}`
-    const answerId = `A-${randomUUID().slice(0, 8).toUpperCase()}`
-    const answerSummary = gradedItems.map((item) => `${item.prompt}: ${item.summaryText}`).join('\n')
-    const storedAnswers = gradedItems.map((item) => ({
-      questionId: item.questionId,
-      type: item.type,
-      response: item.response,
-      earnedPoints: item.earnedPoints,
-      maxPoints: item.maxPoints,
-      needsReview: item.needsReview,
-    }))
-    const submitAttempt = db.transaction(() => {
-      db.prepare(`
-        INSERT INTO assessment_attempts (
-          id, assessment_id, mentee_id, answers_json, score, grading_status, earned_points, max_points, submitted_at
-        )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `).run(attemptId, req.params.id, menteeId, JSON.stringify(storedAnswers), score, gradingStatus, earnedPoints, maxPoints, now)
-      db.prepare(`
-        INSERT INTO answers (
-          id, attempt_id, student, initials, assessment, answer, score,
-          earned_points, max_points, items_json, submitted_at, status
-        )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Needs review')
-      `).run(
-        answerId,
-        attemptId,
-        mentee.name,
-        initialsFor(mentee.name),
-        assessment.title,
-        answerSummary,
-        score,
-        earnedPoints,
-        maxPoints,
-        JSON.stringify(gradedItems),
-        now,
-      )
+
+      const availability = getAvailabilityState(assessment)
+      if (availability === 'upcoming') {
+        return { statusCode: 403, error: 'This assessment is not open yet.' }
+      }
+      if (availability === 'closed') {
+        return { statusCode: 403, error: 'The availability window for this assessment has closed.' }
+      }
+      const attemptCount = db.prepare(`
+        SELECT COUNT(*) AS count FROM assessment_attempts
+        WHERE assessment_id = ? AND mentee_id = ?
+      `).get(req.params.id, menteeId).count
+      const allowance = getAttemptAllowance(assessment, menteeId)
+      if (attemptCount >= allowance.allowedAttempts) {
+        return { statusCode: 409, error: 'The maximum number of attempts has been reached.' }
+      }
+      const finalized = finalizeAttemptRecord({
+        assessment,
+        mentee,
+        submittedAnswers,
+        status: 'submitted',
+        submittedAt: new Date().toISOString(),
+        allowPartial: false,
+      })
+      if (finalized.error) return { statusCode: 400, error: finalized.error }
+      return { statusCode: 201, attempt: finalized.attempt, attemptCount: attemptCount + 1 }
     })
-    submitAttempt()
+
+    const outcome = submitTx.immediate()
+    if (outcome.error) {
+      res.status(outcome.statusCode).json({ error: outcome.error })
+      return
+    }
+    const showResults = resultsAreVisible(assessment)
+    const allowance = getAttemptAllowance(assessment, menteeId)
     res.status(201).json({
       attempt: {
-        id: attemptId,
-        score,
-        earnedPoints,
-        maxPoints,
-        gradingStatus,
-        needsManualGrading,
-        submittedAt: now,
-        attemptCount: attemptCount + 1,
-        maxAttempts: assessment.max_attempts,
+        id: outcome.attempt.id,
+        status: outcome.attempt.status,
+        score: showResults ? outcome.attempt.score : null,
+        earnedPoints: showResults ? outcome.attempt.earnedPoints : null,
+        maxPoints: showResults ? outcome.attempt.maxPoints : null,
+        resultsVisible: showResults,
+        gradingStatus: outcome.attempt.gradingStatus,
+        needsManualGrading: outcome.attempt.needsManualGrading,
+        submittedAt: outcome.attempt.submittedAt,
+        attemptCount: outcome.attemptCount,
+        maxAttempts: allowance.allowedAttempts,
       },
     })
   })
@@ -886,27 +1384,38 @@ export function createApp({
     }
 
     const now = new Date().toISOString()
-    const assessment = {
-      id: `AS-${randomUUID().slice(0, 8).toUpperCase()}`,
-      title: req.body.title.trim(),
-      description: (req.body.description || '').trim(),
-      maxAttempts: req.body.maxAttempts ?? 3,
-      status: 'Draft',
-      createdAt: now,
-      updatedAt: now,
-    }
+    const settings = normalizeAssessmentSettings(req.body)
+    const assessmentId = `AS-${randomUUID().slice(0, 8).toUpperCase()}`
     const insertAssessment = db.transaction(() => {
       db.prepare(`
-        INSERT INTO assessments (id, title, description, max_attempts, status, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-      `).run(assessment.id, assessment.title, assessment.description, assessment.maxAttempts, assessment.status, now, now)
+        INSERT INTO assessments (
+          id, title, description, max_attempts, time_limit_minutes, available_from, available_until,
+          shuffle_questions, shuffle_options, navigation_mode, feedback_policy, results_released,
+          status, created_at, updated_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'Draft', ?, ?)
+      `).run(
+        assessmentId,
+        settings.title,
+        settings.description,
+        settings.maxAttempts,
+        settings.timeLimitMinutes,
+        settings.availableFrom,
+        settings.availableUntil,
+        settings.shuffleQuestions,
+        settings.shuffleOptions,
+        settings.navigationMode,
+        settings.feedbackPolicy,
+        now,
+        now,
+      )
       const insertQuestion = db.prepare('INSERT INTO assessment_questions (assessment_id, question_id, position) VALUES (?, ?, ?)')
-      questionIds.forEach((questionId, index) => insertQuestion.run(assessment.id, questionId, index))
+      questionIds.forEach((questionId, index) => insertQuestion.run(assessmentId, questionId, index))
       const insertAssignment = db.prepare('INSERT INTO assessment_assignments (assessment_id, mentee_id, assigned_at) VALUES (?, ?, ?)')
-      menteeIds.forEach((menteeId) => insertAssignment.run(assessment.id, menteeId, now))
+      menteeIds.forEach((menteeId) => insertAssignment.run(assessmentId, menteeId, now))
     })
     insertAssessment()
-    const row = db.prepare('SELECT * FROM assessments WHERE id = ?').get(assessment.id)
+    const row = db.prepare('SELECT * FROM assessments WHERE id = ?').get(assessmentId)
     res.status(201).json({ assessment: assessmentFromRow(db, row) })
   })
 
@@ -929,6 +1438,56 @@ export function createApp({
     db.prepare('UPDATE assessments SET status = ?, updated_at = ? WHERE id = ?').run(status, updatedAt, req.params.id)
     const row = db.prepare('SELECT * FROM assessments WHERE id = ?').get(req.params.id)
     res.json({ assessment: assessmentFromRow(db, row) })
+  })
+
+  router.post('/assessments/:id/release-results', verifyCsrf, (req, res) => {
+    const existing = db.prepare('SELECT * FROM assessments WHERE id = ?').get(req.params.id)
+    if (!existing) {
+      res.status(404).json({ error: 'Assessment not found.' })
+      return
+    }
+    const updatedAt = new Date().toISOString()
+    db.prepare('UPDATE assessments SET results_released = 1, updated_at = ? WHERE id = ?').run(updatedAt, req.params.id)
+    const row = db.prepare('SELECT * FROM assessments WHERE id = ?').get(req.params.id)
+    res.json({ assessment: assessmentFromRow(db, row) })
+  })
+
+  router.post('/assessments/:id/extra-attempts', verifyCsrf, (req, res) => {
+    const assessment = db.prepare('SELECT * FROM assessments WHERE id = ?').get(req.params.id)
+    if (!assessment) {
+      res.status(404).json({ error: 'Assessment not found.' })
+      return
+    }
+    const menteeId = typeof req.body?.menteeId === 'string' ? req.body.menteeId : ''
+    const extraAttempts = Number(req.body?.extraAttempts ?? 1)
+    const reason = typeof req.body?.reason === 'string' ? req.body.reason.trim() : ''
+    const assignment = db.prepare(`
+      SELECT 1 FROM assessment_assignments WHERE assessment_id = ? AND mentee_id = ?
+    `).get(req.params.id, menteeId)
+    if (!assignment) {
+      res.status(400).json({ error: 'Select a mentee assigned to this assessment.' })
+      return
+    }
+    if (!Number.isInteger(extraAttempts) || extraAttempts < 1 || extraAttempts > 3) {
+      res.status(400).json({ error: 'Extra attempts must be between 1 and 3.' })
+      return
+    }
+    if (!reason || reason.length > 500) {
+      res.status(400).json({ error: 'Provide a reason (1 to 500 characters) for granting extra attempts.' })
+      return
+    }
+    const id = `EX-${randomUUID().slice(0, 8).toUpperCase()}`
+    const createdAt = new Date().toISOString()
+    db.prepare(`
+      INSERT INTO extra_attempt_grants (id, assessment_id, mentee_id, extra_attempts, reason, granted_by, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `).run(id, req.params.id, menteeId, extraAttempts, reason, req.session.admin.name, createdAt)
+    const grant = db.prepare(`
+      SELECT id, mentee_id AS menteeId, extra_attempts AS extraAttempts, reason, granted_by AS grantedBy, created_at AS createdAt
+      FROM extra_attempt_grants WHERE id = ?
+    `).get(id)
+    const row = db.prepare('SELECT * FROM assessments WHERE id = ?').get(req.params.id)
+    res.status(201).json({ grant, assessment: assessmentFromRow(db, row) })
   })
 
   router.patch('/assessments/:id', verifyCsrf, (req, res) => {
@@ -955,12 +1514,28 @@ export function createApp({
       return
     }
     const now = new Date().toISOString()
+    const settings = normalizeAssessmentSettings(req.body)
     const updateAssessment = db.transaction(() => {
       db.prepare(`
         UPDATE assessments
-        SET title = ?, description = ?, max_attempts = ?, updated_at = ?
+        SET title = ?, description = ?, max_attempts = ?, time_limit_minutes = ?,
+            available_from = ?, available_until = ?, shuffle_questions = ?, shuffle_options = ?,
+            navigation_mode = ?, feedback_policy = ?, updated_at = ?
         WHERE id = ?
-      `).run(req.body.title.trim(), (req.body.description || '').trim(), req.body.maxAttempts ?? 3, now, req.params.id)
+      `).run(
+        settings.title,
+        settings.description,
+        settings.maxAttempts,
+        settings.timeLimitMinutes,
+        settings.availableFrom,
+        settings.availableUntil,
+        settings.shuffleQuestions,
+        settings.shuffleOptions,
+        settings.navigationMode,
+        settings.feedbackPolicy,
+        now,
+        req.params.id,
+      )
       db.prepare('DELETE FROM assessment_questions WHERE assessment_id = ?').run(req.params.id)
       db.prepare('DELETE FROM assessment_assignments WHERE assessment_id = ?').run(req.params.id)
       const insertQuestion = db.prepare('INSERT INTO assessment_questions (assessment_id, question_id, position) VALUES (?, ?, ?)')

@@ -407,6 +407,34 @@ export default function AdminDashboard() {
     }
   }
 
+  async function releaseAssessmentResults(assessmentId) {
+    try {
+      const response = await apiRequest(`/assessments/${encodeURIComponent(assessmentId)}/release-results`, {
+        method: 'POST',
+        csrfToken,
+      })
+      setAssessments((current) => current.map((assessment) => assessment.id === assessmentId ? response.assessment : assessment))
+    } catch (error) {
+      if (error.status === 401) handleApiError(error)
+      throw error
+    }
+  }
+
+  async function grantExtraAttempts(assessmentId, input) {
+    try {
+      const response = await apiRequest(`/assessments/${encodeURIComponent(assessmentId)}/extra-attempts`, {
+        method: 'POST',
+        body: input,
+        csrfToken,
+      })
+      setAssessments((current) => current.map((assessment) => assessment.id === assessmentId ? response.assessment : assessment))
+      return response.grant
+    } catch (error) {
+      if (error.status === 401) handleApiError(error)
+      throw error
+    }
+  }
+
   async function createMentee(input) {
     try {
       const response = await apiRequest('/mentees', { method: 'POST', body: input, csrfToken })
@@ -540,6 +568,7 @@ export default function AdminDashboard() {
     uploadMessage, uploadError, fileInput,
     selectFlag, markFlagReviewed, flagReviewNote, setFlagReviewNote, flagReviewError,
     createAssessment, updateAssessmentStatus, updateAssessment, deleteAssessment,
+    releaseAssessmentResults, grantExtraAttempts,
     createMentee, updateMentee, deleteMentee,
     updateMemberRole, toggleMemberStatus, removeMember,
     createInvitation, revokeInvitation,

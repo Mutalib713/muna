@@ -2105,3 +2105,105 @@ tbody tr:nth-child(3n) .student-avatar {
     grid-template-columns: 1fr;
   }
 }
+
+/* --- Learner Briefing, Timer & Autosave --- */
+
+.learner-briefing,
+.learner-runner {
+  display: grid;
+  gap: 14px;
+}
+
+.briefing-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  margin: 0;
+  padding: 12px;
+  border: 1px solid #eceef4;
+  border-radius: 9px;
+  background: #fafbfe;
+}
+
+.briefing-grid dt {
+  font-size: 9px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  color: #8c8e9e;
+}
+
+.briefing-grid dd {
+  margin: 3px 0 0;
+  font-size: 11px;
+  font-weight: 600;
+  color: #36374b;
+}
+
+.learner-receipt {
+  display: grid;
+  gap: 4px;
+  padding: 12px;
+  border: 1px solid #d5eee0;
+  border-radius: 9px;
+  background: #f3fbf7;
+  color: #2c6e4e;
+  font-size: 11px;
+}
+
+.runner-status-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid #e4e2fb;
+  border-radius: 9px;
+  background: #f8f7ff;
+  font-size: 11px;
+  color: #4a4c60;
+}
+
+.runner-save-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 10px;
+  color: #65687c;
+}
+
+.runner-navigator {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.nav-pill {
+  padding: 4px 9px;
+  border: 1px solid #dfe2ec;
+  border-radius: 999px;
+  background: #fff;
+  color: #55576b;
+  font-size: 10px;
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.nav-pill-answered {
+  border-color: #9e97eb;
+  background: #f0efff;
+  color: #5047bd;
+}
+
+.runner-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
+@media (max-width: 560px) {
+  .briefing-grid {
+    grid-template-columns: 1fr;
+  }
+}

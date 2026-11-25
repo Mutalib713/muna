@@ -1,4 +1,5 @@
 import { useMemo, useState } from 'react'
+import { formatDateTime } from '../format'
 import { QUESTION_TYPE_LABELS } from '../questionTypes'
 import './Assessments.css'
 
@@ -8,21 +9,69 @@ const statusClass = {
   Paused: 'assessment-status-paused',
 }
 
+const FEEDBACK_LABELS = {
+  immediate: 'Immediate feedback',
+  after_deadline: 'Feedback after deadline',
+  manual: 'Manual feedback release',
+}
+
 function initialsFor(name) {
   return name.split(' ').map((part) => part[0]).join('').slice(0, 2).toUpperCase()
 }
 
+function toDatetimeLocal(iso) {
+  if (!iso) return ''
+  const date = new Date(iso)
+  if (Number.isNaN(date.getTime())) return ''
+  const pad = (n) => String(n).padStart(2, '0')
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`
+}
+
+function fromDatetimeLocal(value) {
+  if (!value) return null
+  const date = new Date(value)
+  return Number.isNaN(date.getTime()) ? null : date.toISOString()
+}
+
 function newAssessmentForm() {
-  return { title: '', description: '', questionIds: [], menteeIds: [], maxAttempts: '3' }
+  return {
+    title: '',
+    description: '',
+    questionIds: [],
+    menteeIds: [],
+    maxAttempts: '3',
+    timeLimitMinutes: '',
+    availableFrom: '',
+    availableUntil: '',
+    shuffleQuestions: false,
+    shuffleOptions: false,
+    navigationMode: 'free',
+    feedbackPolicy: 'immediate',
+  }
 }
 
 export default function Assessments({ dashboard }) {
-  const { questions, assessments, mentees, search, createAssessment: saveAssessment, updateAssessment: saveAssessmentChanges, deleteAssessment, updateAssessmentStatus } = dashboard
+  const {
+    questions,
+    assessments,
+    mentees,
+    search,
+    createAssessment: saveAssessment,
+    updateAssessment: saveAssessmentChanges,
+    deleteAssessment,
+    updateAssessmentStatus,
+    releaseAssessmentResults,
+    grantExtraAttempts,
+  } = dashboard
   const [modalOpen, setModalOpen] = useState(false)
   const [form, setForm] = useState(newAssessmentForm)
   const [formError, setFormError] = useState('')
   const [viewError, setViewError] = useState('')
   const [editingAssessmentId, setEditingAssessmentId] = useState(null)
+  const [extraModalAssessment, setExtraModalAssessment] = useState(null)
+  const [extraForm, setExtraForm] = useState({ menteeId: '', extraAttempts: '1', reason: '' })
+  const [extraError, setExtraError] = useState('')
+  const [extraBusy, setExtraBusy] = useState(false)
 
   const filteredAssessments = useMemo(() => {
     const query = search.trim().toLowerCase()
@@ -70,6 +119,13 @@ export default function Assessments({ dashboard }) {
         questionIds: [...form.questionIds],
         menteeIds: [...form.menteeIds],
         maxAttempts: Number(form.maxAttempts),
+        timeLimitMinutes: form.timeLimitMinutes === '' ? null : Number(form.timeLimitMinutes),
+        availableFrom: fromDatetimeLocal(form.availableFrom),
+        availableUntil: fromDatetimeLocal(form.availableUntil),
+        shuffleQuestions: Boolean(form.shuffleQuestions),
+        shuffleOptions: Boolean(form.shuffleOptions),
+        navigationMode: form.navigationMode,
+        feedbackPolicy: form.feedbackPolicy,
       }
       if (editingAssessmentId) await saveAssessmentChanges(editingAssessmentId, input)
       else await saveAssessment(input)
@@ -92,6 +148,44 @@ export default function Assessments({ dashboard }) {
     }
   }
 
+  async function handleReleaseResults(assessment) {
+    setViewError('')
+    try {
+      await releaseAssessmentResults(assessment.id)
+    } catch (error) {
+      setViewError(error.message)
+    }
+  }
+
+  function openExtraAttemptModal(assessment) {
+    setExtraModalAssessment(assessment)
+    setExtraForm({
+      menteeId: assessment.menteeIds[0] || '',
+      extraAttempts: '1',
+      reason: '',
+    })
+    setExtraError('')
+  }
+
+  async function submitExtraAttempt(event) {
+    event.preventDefault()
+    if (!extraModalAssessment) return
+    setExtraError('')
+    setExtraBusy(true)
+    try {
+      await grantExtraAttempts(extraModalAssessment.id, {
+        menteeId: extraForm.menteeId,
+        extraAttempts: Number(extraForm.extraAttempts),
+        reason: extraForm.reason,
+      })
+      setExtraModalAssessment(null)
+    } catch (error) {
+      setExtraError(error.message)
+    } finally {
+      setExtraBusy(false)
+    }
+  }
+
   function closeModal() {
     setModalOpen(false)
     setForm(newAssessmentForm())
@@ -107,6 +201,13 @@ export default function Assessments({ dashboard }) {
       questionIds: [...assessment.questionIds],
       menteeIds: [...assessment.menteeIds],
       maxAttempts: String(assessment.maxAttempts),
+      timeLimitMinutes: assessment.timeLimitMinutes ? String(assessment.timeLimitMinutes) : '',
+      availableFrom: toDatetimeLocal(assessment.availableFrom),
+      availableUntil: toDatetimeLocal(assessment.availableUntil),
+      shuffleQuestions: Boolean(assessment.shuffleQuestions),
+      shuffleOptions: Boolean(assessment.shuffleOptions),
+      navigationMode: assessment.navigationMode || 'free',
+      feedbackPolicy: assessment.feedbackPolicy || 'immediate',
     })
     setFormError('')
     setModalOpen(true)
@@ -128,7 +229,7 @@ export default function Assessments({ dashboard }) {
         <div>
           <p className="eyebrow">ASSESSMENT DELIVERY</p>
           <h1>Assessments</h1>
-          <p className="subheading">Build from your question bank, assign mentees, and control availability.</p>
+          <p className="subheading">Build from your question bank, configure timing and feedback rules, and assign mentees.</p>
         </div>
         <button className="button button-primary" onClick={() => setModalOpen(true)}>+ Create assessment</button>
       </div>
@@ -140,7 +241,7 @@ export default function Assessments({ dashboard }) {
       </div>
 
       <div className="assessment-attempt-note" role="note">
-        <strong>Attempt limit:</strong> New assessments allow up to <strong>3 attempts per mentee</strong> by default. Choose 1–3 attempts when creating an assessment.
+        <strong>Attempt limit:</strong> New assessments allow up to <strong>3 attempts per mentee</strong> by default. Mentors can also grant audited extra attempts for technical incidents or accommodations.
       </div>
       {viewError && <p className="inline-message error-message" role="alert">{viewError}</p>}
 
@@ -156,13 +257,32 @@ export default function Assessments({ dashboard }) {
             const questionPrompts = assessment.questionIds
               .map((questionId) => questions.find((question) => question.id === questionId)?.prompt)
               .filter(Boolean)
+            const canReleaseManually =
+              assessment.status !== 'Draft' &&
+              assessment.feedbackPolicy === 'manual' &&
+              !assessment.resultsReleased
 
             return (
               <article className="assessment-row" key={assessment.id}>
                 <div className="assessment-main">
-                  <div className="assessment-title-line"><h3>{assessment.title}</h3><span className={`assessment-status ${statusClass[assessment.status]}`}>{assessment.status}</span></div>
+                  <div className="assessment-title-line">
+                    <h3>{assessment.title}</h3>
+                    <span className={`assessment-status ${statusClass[assessment.status]}`}>{assessment.status}</span>
+                  </div>
                   {assessment.description && <p className="assessment-description">{assessment.description}</p>}
-                  <span className="assessment-question-count">{assessment.questionIds.length} questions</span>
+                  <div className="assessment-delivery-tags">
+                    <span>{assessment.questionIds.length} questions</span>
+                    <span>{assessment.timeLimitMinutes ? `${assessment.timeLimitMinutes} min limit` : 'Untimed'}</span>
+                    <span>{assessment.navigationMode === 'sequential' ? 'Sequential nav' : 'Free nav'}</span>
+                    {assessment.shuffleQuestions && <span>Shuffled questions</span>}
+                    {assessment.shuffleOptions && <span>Shuffled options</span>}
+                    <span>{assessment.resultsReleased ? 'Results released' : (FEEDBACK_LABELS[assessment.feedbackPolicy] || 'Immediate feedback')}</span>
+                  </div>
+                  {(assessment.availableFrom || assessment.availableUntil) && (
+                    <span className="assessment-window-meta">
+                      Window: {assessment.availableFrom ? formatDateTime(assessment.availableFrom) : 'Now'} → {assessment.availableUntil ? formatDateTime(assessment.availableUntil) : 'No end date'}
+                    </span>
+                  )}
                   <div className="assessment-question-preview">{assessment.questionIds.slice(0, 2).map((questionId) => {
                     const question = questions.find((item) => item.id === questionId)
                     return question && <span key={question.id}>{question.prompt}</span>
@@ -178,12 +298,29 @@ export default function Assessments({ dashboard }) {
                 </div>
                 <div className="assessment-attempts">
                   <span className="assessment-column-label">ATTEMPTS / MENTEE</span>
-                  <strong>{assessment.maxAttempts}</strong><span>maximum</span>
+                  <strong>{assessment.maxAttempts}</strong><span>base max</span>
+                  {assessment.extraAttemptGrants?.length > 0 && (
+                    <small className="assessment-grants-count">+{assessment.extraAttemptGrants.length} override{assessment.extraAttemptGrants.length === 1 ? '' : 's'}</small>
+                  )}
                 </div>
                 <div className="assessment-actions">
-                  {assessment.status === 'Draft'
-                    ? <><button className="small-button" onClick={() => editAssessment(assessment)}>Edit</button><button className="small-button" onClick={() => removeAssessment(assessment)}>Delete</button><button className="button button-primary assessment-action-button" onClick={() => togglePublishedState(assessment)}>Publish</button></>
-                    : <button className="button button-secondary assessment-action-button" onClick={() => togglePublishedState(assessment)}>{assessment.status === 'Published' ? 'Pause' : 'Resume'}</button>}
+                  {assessment.status === 'Draft' ? (
+                    <>
+                      <button className="small-button" onClick={() => editAssessment(assessment)}>Edit</button>
+                      <button className="small-button" onClick={() => removeAssessment(assessment)}>Delete</button>
+                      <button className="button button-primary assessment-action-button" onClick={() => togglePublishedState(assessment)}>Publish</button>
+                    </>
+                  ) : (
+                    <>
+                      <button className="small-button" onClick={() => openExtraAttemptModal(assessment)}>Extra attempt</button>
+                      {canReleaseManually && (
+                        <button className="small-button" onClick={() => handleReleaseResults(assessment)}>Release results</button>
+                      )}
+                      <button className="button button-secondary assessment-action-button" onClick={() => togglePublishedState(assessment)}>
+                        {assessment.status === 'Published' ? 'Pause' : 'Resume'}
+                      </button>
+                    </>
+                  )}
                 </div>
               </article>
             )
@@ -196,7 +333,7 @@ export default function Assessments({ dashboard }) {
         </div>}
       </section>
 
-      <p className="assessment-data-note">Assessment settings and assignments are saved in SQLite. Mentee attempts can be opened at <code>#/learner/&lt;mentee-id&gt;</code>.</p>
+      <p className="assessment-data-note">Assessment rules, autosave drafts, and attempts are saved in SQLite. Mentee attempts can be opened at <code>#/learner/&lt;mentee-id&gt;</code>.</p>
 
       {modalOpen && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) closeModal() }}>
         <section className="modal-card assessment-modal" role="dialog" aria-modal="true" aria-labelledby="create-assessment-title">
@@ -207,7 +344,57 @@ export default function Assessments({ dashboard }) {
           <form onSubmit={createAssessment}>
             <label className="form-label">Assessment title<input autoFocus maxLength="120" required value={form.title} onChange={(event) => setForm({ ...form, title: event.target.value })} placeholder="e.g. Algebra foundations" /></label>
             <label className="form-label">Instructions <span className="assessment-optional">(optional)</span><textarea rows="2" maxLength="1000" value={form.description} onChange={(event) => setForm({ ...form, description: event.target.value })} placeholder="Tell mentees what to expect..." /></label>
-            <label className="form-label">Maximum attempts per mentee<select value={form.maxAttempts} onChange={(event) => setForm({ ...form, maxAttempts: event.target.value })}><option value="3">3 attempts — default</option><option value="2">2 attempts</option><option value="1">1 attempt</option></select></label>
+
+            <div className="assessment-rules-grid">
+              <label className="form-label">Maximum attempts per mentee
+                <select value={form.maxAttempts} onChange={(event) => setForm({ ...form, maxAttempts: event.target.value })}>
+                  <option value="3">3 attempts — default</option>
+                  <option value="2">2 attempts</option>
+                  <option value="1">1 attempt</option>
+                </select>
+              </label>
+              <label className="form-label">Time limit (minutes) <span className="assessment-optional">(blank = untimed)</span>
+                <input
+                  type="number"
+                  min="1"
+                  max="300"
+                  placeholder="e.g. 30"
+                  value={form.timeLimitMinutes}
+                  onChange={(event) => setForm({ ...form, timeLimitMinutes: event.target.value })}
+                />
+              </label>
+              <label className="form-label">Available from <span className="assessment-optional">(optional)</span>
+                <input type="datetime-local" value={form.availableFrom} onChange={(event) => setForm({ ...form, availableFrom: event.target.value })} />
+              </label>
+              <label className="form-label">Available until <span className="assessment-optional">(optional)</span>
+                <input type="datetime-local" value={form.availableUntil} onChange={(event) => setForm({ ...form, availableUntil: event.target.value })} />
+              </label>
+              <label className="form-label">Navigation policy
+                <select value={form.navigationMode} onChange={(event) => setForm({ ...form, navigationMode: event.target.value })}>
+                  <option value="free">Free navigation</option>
+                  <option value="sequential">Sequential (in order)</option>
+                </select>
+              </label>
+              <label className="form-label">Feedback release
+                <select value={form.feedbackPolicy} onChange={(event) => setForm({ ...form, feedbackPolicy: event.target.value })}>
+                  <option value="immediate">Immediately after submit</option>
+                  <option value="after_deadline">After availability end date</option>
+                  <option value="manual">Manual mentor release</option>
+                </select>
+              </label>
+            </div>
+
+            <div className="assessment-toggles">
+              <label className="checkbox-inline">
+                <input type="checkbox" checked={form.shuffleQuestions} onChange={(event) => setForm({ ...form, shuffleQuestions: event.target.checked })} />
+                <span>Shuffle question order per attempt</span>
+              </label>
+              <label className="checkbox-inline">
+                <input type="checkbox" checked={form.shuffleOptions} onChange={(event) => setForm({ ...form, shuffleOptions: event.target.checked })} />
+                <span>Shuffle MCQ option order per attempt</span>
+              </label>
+            </div>
+
             <fieldset className="assessment-choice-group">
               <legend>Choose questions <span>{form.questionIds.length} selected</span></legend>
               {questions.length ? questions.map((question) => <label className={`assessment-choice ${form.questionIds.includes(question.id) ? 'assessment-choice-selected' : ''}`} key={question.id}><input type="checkbox" checked={form.questionIds.includes(question.id)} onChange={() => toggleSelection('questionIds', question.id)} /><span><strong>{question.prompt}</strong><small>{question.id} · {QUESTION_TYPE_LABELS[question.type || 'mcq']} · {question.points ?? 1} pts</small></span></label>) : <p className="assessment-choice-empty">Add questions to the question bank before creating an assessment.</p>}
@@ -216,9 +403,53 @@ export default function Assessments({ dashboard }) {
               <legend>Assign to mentees <span>{form.menteeIds.length} selected</span></legend>
               {mentees.map((mentee) => <label className={`assessment-choice ${form.menteeIds.includes(mentee.id) ? 'assessment-choice-selected' : ''}`} key={mentee.id}><input type="checkbox" checked={form.menteeIds.includes(mentee.id)} onChange={() => toggleSelection('menteeIds', mentee.id)} /><span><strong>{mentee.name}</strong><small>{mentee.email}</small></span></label>)}
             </fieldset>
-            <p className="assessment-draft-note">This creates a draft. Review the selected questions and mentees, then publish it to make it available.</p>
+            <p className="assessment-draft-note">This creates a draft. Review the selected questions, delivery rules, and mentees, then publish it to make it available.</p>
             {formError && <p className="inline-message error-message" role="alert">{formError}</p>}
             <div className="modal-actions"><button type="button" className="button button-secondary" onClick={closeModal}>Cancel</button><button type="submit" className="button button-primary">{editingAssessmentId ? 'Save draft' : 'Create draft'}</button></div>
+          </form>
+        </section>
+      </div>}
+
+      {extraModalAssessment && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setExtraModalAssessment(null) }}>
+        <section className="modal-card" role="dialog" aria-modal="true" aria-labelledby="extra-attempt-title">
+          <div className="modal-heading">
+            <div><p className="eyebrow">ATTEMPT OVERRIDE</p><h2 id="extra-attempt-title">Grant extra attempt</h2></div>
+            <button className="icon-button" onClick={() => setExtraModalAssessment(null)} aria-label="Close">×</button>
+          </div>
+          <form onSubmit={submitExtraAttempt}>
+            <p className="assessment-draft-note">Granting extra attempts for <strong>{extraModalAssessment.title}</strong> is audit-logged with your name and reason.</p>
+            <label className="form-label">Mentee
+              <select value={extraForm.menteeId} onChange={(event) => setExtraForm({ ...extraForm, menteeId: event.target.value })}>
+                {extraModalAssessment.menteeIds.map((id) => {
+                  const mentee = mentees.find((m) => m.id === id)
+                  return <option key={id} value={id}>{mentee ? `${mentee.name} (${mentee.email})` : id}</option>
+                })}
+              </select>
+            </label>
+            <label className="form-label">Additional attempts
+              <select value={extraForm.extraAttempts} onChange={(event) => setExtraForm({ ...extraForm, extraAttempts: event.target.value })}>
+                <option value="1">+1 attempt</option>
+                <option value="2">+2 attempts</option>
+                <option value="3">+3 attempts</option>
+              </select>
+            </label>
+            <label className="form-label">Reason (required)
+              <textarea required rows="2" maxLength="500" value={extraForm.reason} onChange={(event) => setExtraForm({ ...extraForm, reason: event.target.value })} placeholder="e.g. Network disconnect during attempt 3" />
+            </label>
+            {extraModalAssessment.extraAttemptGrants?.length > 0 && (
+              <div className="extra-grants-history">
+                <strong>Previous grants</strong>
+                {extraModalAssessment.extraAttemptGrants.map((grant) => {
+                  const mentee = mentees.find((m) => m.id === grant.menteeId)
+                  return <small key={grant.id}>{mentee?.name || grant.menteeId}: +{grant.extraAttempts} by {grant.grantedBy} — &ldquo;{grant.reason}&rdquo;</small>
+                })}
+              </div>
+            )}
+            {extraError && <p className="inline-message error-message" role="alert">{extraError}</p>}
+            <div className="modal-actions">
+              <button type="button" className="button button-secondary" onClick={() => setExtraModalAssessment(null)}>Cancel</button>
+              <button type="submit" className="button button-primary" disabled={extraBusy}>{extraBusy ? 'Granting…' : 'Grant extra attempt'}</button>
+            </div>
           </form>
         </section>
       </div>}

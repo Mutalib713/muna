@@ -517,3 +517,155 @@ test('only one concurrent setup request can create the admin account', async () 
   assert.equal(db.prepare('SELECT COUNT(*) AS count FROM admin_account').get().count, 1)
   db.close()
 })
+
+test('assessment delivery rules: availability windows, start/resume idempotency, autosave, expiry, feedback policy, and extra attempts', async () => {
+  const db = createDatabase(':memory:')
+  const app = createApp({
+    db,
+    setupCode: 'test-setup-code',
+    sessionSecret: 'test-session-secret-long-enough-for-tests',
+  })
+  const client = request.agent(app)
+  const csrf = (await client.get('/api/auth/csrf')).body.csrfToken
+  const setup = await client.post('/api/auth/setup')
+    .set('X-CSRF-Token', csrf)
+    .send({
+      name: 'Mentor Lead',
+      email: 'mentor@example.test',
+      password: 'test-admin-password-2026',
+      confirmPassword: 'test-admin-password-2026',
+      setupCode: 'test-setup-code',
+    })
+  const adminCsrf = setup.body.csrfToken
+
+  const q1 = (await client.post('/api/questions').set('X-CSRF-Token', adminCsrf).send({
+    prompt: 'Capital of Ghana?',
+    options: ['Accra', 'Kumasi'],
+    correctAnswer: 'Accra',
+    points: 2,
+  })).body.question
+  const q2 = (await client.post('/api/questions').set('X-CSRF-Token', adminCsrf).send({
+    prompt: '2 + 3 = ?',
+    options: ['4', '5'],
+    correctAnswer: '5',
+    points: 3,
+  })).body.question
+  const mentee = (await client.post('/api/mentees').set('X-CSRF-Token', adminCsrf).send({
+    name: 'Nadia Mensah',
+    email: 'nadia@example.test',
+  })).body.mentee
+
+  // Reject after_deadline feedback without an availableUntil date
+  const missingDeadline = await client.post('/api/assessments').set('X-CSRF-Token', adminCsrf).send({
+    title: 'Bad feedback rule',
+    questionIds: [q1.id],
+    menteeIds: [mentee.id],
+    feedbackPolicy: 'after_deadline',
+  })
+  assert.equal(missingDeadline.status, 400)
+
+  // Future availability window rejects early start
+  const futureStart = new Date(Date.now() + 60 * 60 * 1000).toISOString()
+  const futureEnd = new Date(Date.now() + 2 * 60 * 60 * 1000).toISOString()
+  const upcoming = (await client.post('/api/assessments').set('X-CSRF-Token', adminCsrf).send({
+    title: 'Upcoming Quiz',
+    questionIds: [q1.id],
+    menteeIds: [mentee.id],
+    availableFrom: futureStart,
+    availableUntil: futureEnd,
+  })).body.assessment
+  await client.patch(`/api/assessments/${upcoming.id}/status`).set('X-CSRF-Token', adminCsrf).send({ status: 'Published' })
+  const earlyStart = await client.post(`/api/learner/assessments/${upcoming.id}/start`).send({ menteeId: mentee.id })
+  assert.equal(earlyStart.status, 403)
+
+  // Open assessment: 1 attempt max, 15 min timer, manual feedback, shuffled options
+  const openRes = await client.post('/api/assessments').set('X-CSRF-Token', adminCsrf).send({
+    title: 'Timed Midterm',
+    questionIds: [q1.id, q2.id],
+    menteeIds: [mentee.id],
+    maxAttempts: 1,
+    timeLimitMinutes: 15,
+    shuffleQuestions: true,
+    shuffleOptions: true,
+    navigationMode: 'sequential',
+    feedbackPolicy: 'manual',
+  })
+  assert.equal(openRes.status, 201)
+  const openId = openRes.body.assessment.id
+  await client.patch(`/api/assessments/${openId}/status`).set('X-CSRF-Token', adminCsrf).send({ status: 'Published' })
+
+  // Start consumes 1 attempt; second start resumes same attempt idempotently
+  const start1 = await client.post(`/api/learner/assessments/${openId}/start`).send({ menteeId: mentee.id })
+  assert.equal(start1.status, 201)
+  assert.equal(start1.body.resumed, false)
+  assert.ok(start1.body.attempt.expiresAt)
+
+  const start2 = await client.post(`/api/learner/assessments/${openId}/start`).send({ menteeId: mentee.id })
+  assert.equal(start2.status, 200)
+  assert.equal(start2.body.resumed, true)
+  assert.equal(start2.body.attempt.id, start1.body.attempt.id)
+
+  // Autosave partial response
+  const autosave = await client.put(`/api/learner/attempts/${start1.body.attempt.id}/responses`)
+    .send({ menteeId: mentee.id, answers: { [q1.id]: 'Accra' } })
+  assert.equal(autosave.status, 200)
+  assert.ok(autosave.body.lastSavedAt)
+
+  // Verify autosaved draft survives reload
+  const learnerView = await client.get(`/api/learner/assessments/${mentee.id}`)
+  const openView = learnerView.body.assessments.find((a) => a.id === openId)
+  assert.equal(openView.attemptCount, 1)
+  assert.deepEqual(openView.activeAttempt.draftAnswers, { [q1.id]: 'Accra' })
+
+  // Submit attempt: score hidden because feedbackPolicy === 'manual'
+  const submit1 = await client.post(`/api/learner/assessments/${openId}/attempts`).send({
+    menteeId: mentee.id,
+    attemptId: start1.body.attempt.id,
+    answers: { [q1.id]: 'Accra', [q2.id]: '5' },
+  })
+  assert.equal(submit1.status, 201)
+  assert.equal(submit1.body.attempt.resultsVisible, false)
+  assert.equal(submit1.body.attempt.score, null)
+
+  // Starting another attempt is blocked at maxAttempts = 1
+  const blockedStart = await client.post(`/api/learner/assessments/${openId}/start`).send({ menteeId: mentee.id })
+  assert.equal(blockedStart.status, 409)
+
+  // Mentor grants +1 extra attempt (reason required) and releases results
+  const missingReason = await client.post(`/api/assessments/${openId}/extra-attempts`)
+    .set('X-CSRF-Token', adminCsrf)
+    .send({ menteeId: mentee.id, extraAttempts: 1, reason: '' })
+  assert.equal(missingReason.status, 400)
+
+  const granted = await client.post(`/api/assessments/${openId}/extra-attempts`)
+    .set('X-CSRF-Token', adminCsrf)
+    .send({ menteeId: mentee.id, extraAttempts: 1, reason: 'Browser crashed during review' })
+  assert.equal(granted.status, 201)
+  assert.equal(granted.body.assessment.extraAttemptGrants.length, 1)
+
+  const released = await client.post(`/api/assessments/${openId}/release-results`)
+    .set('X-CSRF-Token', adminCsrf)
+  assert.equal(released.status, 200)
+  assert.equal(released.body.assessment.resultsReleased, true)
+
+  const learnerAfterRelease = await client.get(`/api/learner/assessments/${mentee.id}`)
+  const releasedView = learnerAfterRelease.body.assessments.find((a) => a.id === openId)
+  assert.equal(releasedView.maxAttempts, 2)
+  assert.equal(releasedView.latestSubmission.resultsVisible, true)
+  assert.equal(releasedView.latestSubmission.score, '5 / 5')
+
+  // Second attempt started, autosaved, then expires on server -> auto-submits draft on next interaction
+  const startSecond = await client.post(`/api/learner/assessments/${openId}/start`).send({ menteeId: mentee.id })
+  assert.equal(startSecond.status, 201)
+  await client.put(`/api/learner/attempts/${startSecond.body.attempt.id}/responses`)
+    .send({ menteeId: mentee.id, answers: { [q1.id]: 'Accra' } })
+  db.prepare('UPDATE assessment_attempts SET expires_at = ? WHERE id = ?').run('2020-01-01T00:00:00.000Z', startSecond.body.attempt.id)
+
+  const lateAutosave = await client.put(`/api/learner/attempts/${startSecond.body.attempt.id}/responses`)
+    .send({ menteeId: mentee.id, answers: { [q1.id]: 'Accra', [q2.id]: '5' } })
+  assert.equal(lateAutosave.status, 409)
+  assert.equal(lateAutosave.body.expired, true)
+  assert.equal(lateAutosave.body.attempt.score, '2 / 5')
+
+  db.close()
+})
