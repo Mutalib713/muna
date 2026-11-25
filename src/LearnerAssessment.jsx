@@ -1,33 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import DrawingCanvas from './components/DrawingCanvas'
-import { formatDateTime } from './dashboard/format'
-import { QUESTION_TYPE_LABELS } from './dashboard/questionTypes'
+import LearnerBriefing from './learner/LearnerBriefing'
+import LearnerRunner from './learner/LearnerRunner'
 import './dashboard/Dashboard.css'
-
-const FEEDBACK_POLICY_COPY = {
-  immediate: 'Scores are shown immediately after submission.',
-  after_deadline: 'Scores are released after the availability deadline.',
-  manual: 'Scores are held until your mentor releases results.',
-}
-
-function isQuestionAnswered(question, value) {
-  const type = question.type || 'mcq'
-  if (type === 'multi_select') return Array.isArray(value) && value.length > 0
-  if (type === 'drawing') {
-    return (Array.isArray(value?.strokes) && value.strokes.length > 0) ||
-      (typeof value?.altText === 'string' && value.altText.trim().length > 0)
-  }
-  return typeof value === 'string' && value.trim().length > 0
-}
-
-function formatRemaining(ms) {
-  const totalSeconds = Math.max(0, Math.ceil(ms / 1000))
-  const hours = Math.floor(totalSeconds / 3600)
-  const minutes = Math.floor((totalSeconds % 3600) / 60)
-  const seconds = totalSeconds % 60
-  const pad = (n) => String(n).padStart(2, '0')
-  return hours > 0 ? `${hours}:${pad(minutes)}:${pad(seconds)}` : `${pad(minutes)}:${pad(seconds)}`
-}
 
 export default function LearnerAssessment({ hash }) {
   const [hashPath, hashQuery] = hash.split('?')
@@ -40,7 +14,7 @@ export default function LearnerAssessment({ hash }) {
   const [activeQuestions, setActiveQuestions] = useState([])
   const [currentIndex, setCurrentIndex] = useState(0)
   const [answers, setAnswers] = useState({})
-  const [saveState, setSaveState] = useState('idle') // 'idle' | 'saving' | 'saved' | 'error'
+  const [saveState, setSaveState] = useState('idle')
   const [lastSavedAt, setLastSavedAt] = useState(null)
   const [nowMs, setNowMs] = useState(() => Date.now())
   const [starting, setStarting] = useState(false)
@@ -63,9 +37,7 @@ export default function LearnerAssessment({ hash }) {
   )
 
   useEffect(() => {
-    if (!selected || selected.securityMode !== 'seb' || !menteeId.trim()) {
-      return undefined
-    }
+    if (!selected || selected.securityMode !== 'seb' || !menteeId.trim()) return undefined
     let active = true
     async function checkSeb() {
       try {
@@ -164,7 +136,6 @@ export default function LearnerAssessment({ hash }) {
     }
   }, [menteeId, selectedId, loadAssessments])
 
-  // Debounced autosave while an attempt is in progress.
   useEffect(() => {
     if (!activeAttempt?.id) return undefined
     const timer = window.setTimeout(() => {
@@ -175,14 +146,6 @@ export default function LearnerAssessment({ hash }) {
 
   const submitAttempt = useCallback(async ({ autoExpired = false } = {}) => {
     if (!selected || !activeAttempt) return
-    if (!autoExpired) {
-      for (const question of activeQuestions) {
-        if (!isQuestionAnswered(question, answersRef.current[question.id])) {
-          setError('Answer every question before submitting.')
-          return
-        }
-      }
-    }
     setError('')
     setSubmitting(true)
     try {
@@ -197,7 +160,7 @@ export default function LearnerAssessment({ hash }) {
         }),
       })
       const payload = await response.json()
-      if (!response.ok) throw new Error(payload.error || 'Could not submit the assessment.')
+      if (!response.ok) throw new Error(payload.error || 'Could not submit answers.')
       setResult(payload.attempt)
       setActiveAttempt(null)
       await loadAssessments(menteeId, selected.id)
@@ -206,13 +169,12 @@ export default function LearnerAssessment({ hash }) {
     } finally {
       setSubmitting(false)
     }
-  }, [selected, activeAttempt, activeQuestions, menteeId, loadAssessments])
+  }, [selected, activeAttempt, menteeId, loadAssessments])
 
   const remainingMs = activeAttempt?.expiresAt
     ? Math.max(0, Date.parse(activeAttempt.expiresAt) - nowMs)
     : null
 
-  // Display-only countdown driven by server expiresAt; triggers auto-submit at 0.
   useEffect(() => {
     if (!activeAttempt?.expiresAt) return undefined
     const expiresMs = Date.parse(activeAttempt.expiresAt)
@@ -256,11 +218,11 @@ export default function LearnerAssessment({ hash }) {
     if (!activeAttempt?.id) return undefined
     const attemptId = activeAttempt.id
     const onVisibilityChange = () => {
-      if (document.visibilityState === 'hidden') {
-        recordSecurityEvent(attemptId, 'visibility_hidden', 'Document visibility changed to hidden')
-      } else {
-        recordSecurityEvent(attemptId, 'visibility_visible', 'Document visibility restored')
-      }
+      recordSecurityEvent(
+        attemptId,
+        document.visibilityState === 'hidden' ? 'visibility_hidden' : 'visibility_visible',
+        document.visibilityState === 'hidden' ? 'Document visibility changed to hidden' : 'Document visibility restored',
+      )
     }
     const onWindowBlur = () => recordSecurityEvent(attemptId, 'window_blur')
     const onWindowFocus = () => recordSecurityEvent(attemptId, 'window_focus')
@@ -337,17 +299,8 @@ export default function LearnerAssessment({ hash }) {
   }
 
   function navigateToQuestion(nextIndex) {
-    if (!selected) return
-    if (selected.navigationMode === 'sequential' && nextIndex > currentIndex) {
-      const currentQ = activeQuestions[currentIndex]
-      if (currentQ && !isQuestionAnswered(currentQ, answers[currentQ.id])) {
-        setError('Answer the current question before moving to the next one.')
-        return
-      }
-    }
-    setError('')
     if (activeAttempt?.id) {
-      persistDraft(activeAttempt.id, answers)
+      persistDraft(activeAttempt.id, answersRef.current)
     }
     setCurrentIndex(nextIndex)
   }
@@ -390,279 +343,36 @@ export default function LearnerAssessment({ hash }) {
             </label>
 
             {!activeAttempt ? (
-              <div className="learner-briefing">
-                {selected.description && <p className="assessment-description">{selected.description}</p>}
-                <dl className="briefing-grid">
-                  <div><dt>Questions</dt><dd>{selected.questions.length}</dd></div>
-                  <div><dt>Time limit</dt><dd>{selected.timeLimitMinutes ? `${selected.timeLimitMinutes} minutes` : 'Untimed'}</dd></div>
-                  <div>
-                    <dt>Attempts</dt>
-                    <dd>
-                      {selected.attemptCount} of {selected.maxAttempts} used
-                      {selected.extraAttempts > 0 ? ` (includes +${selected.extraAttempts} granted)` : ''}
-                    </dd>
-                  </div>
-                  <div><dt>Navigation</dt><dd>{selected.navigationMode === 'sequential' ? 'Sequential (one by one)' : 'Free navigation'}</dd></div>
-                  <div><dt>Availability</dt><dd>
-                    {selected.availabilityState === 'upcoming' && `Opens ${formatDateTime(selected.availableFrom)}`}
-                    {selected.availabilityState === 'closed' && `Closed ${formatDateTime(selected.availableUntil)}`}
-                    {selected.availabilityState === 'open' && (selected.availableUntil ? `Open until ${formatDateTime(selected.availableUntil)}` : 'Open')}
-                  </dd></div>
-                  <div><dt>Feedback</dt><dd>{FEEDBACK_POLICY_COPY[selected.feedbackPolicy] || FEEDBACK_POLICY_COPY.immediate}</dd></div>
-                  <div><dt>Security mode</dt><dd>
-                    {selected.securityMode === 'seb'
-                      ? 'Safe Exam Browser (SEB required)'
-                      : selected.securityMode === 'strict_web'
-                        ? 'Strict web mode (locks on tab switch)'
-                        : 'Standard web mode'}
-                  </dd></div>
-                  <div><dt>Readiness</dt><dd>
-                    {selected.securityMode === 'seb'
-                      ? (sebStatus?.sebVerified
-                        ? 'SEB session verified — ready to start'
-                        : 'SEB required — launch using the downloaded .seb file')
-                      : (fullscreenSupported ? 'Browser ready (full-screen supported)' : 'Browser ready (full-screen unavailable)')}
-                  </dd></div>
-                </dl>
-
-                <p className="assessment-draft-note">
-                  Starting an assessment consumes <strong>1 attempt</strong>. Your answers autosave as you work, and refreshing resumes an active attempt.{' '}
-                  {selected.securityMode === 'seb'
-                    ? 'Open the .seb configuration file in Safe Exam Browser to start. Contact your mentor if you need an accessibility accommodation or fallback.'
-                    : selected.securityMode === 'strict_web'
-                      ? 'Under strict web mode, switching tabs or leaving the page will lock and submit your last saved answers for mentor review.'
-                      : 'Visibility and focus transitions are logged with server timestamps for mentor review.'}
-                </p>
-
-                {selected.securityMode === 'seb' && selected.sebConfigReady && (
-                  <p style={{ margin: '0 0 12px' }}>
-                    <a
-                      className="button button-secondary"
-                      href={`/api/learner/assessments/${encodeURIComponent(selected.id)}/seb-config?menteeId=${encodeURIComponent(menteeId.trim())}`}
-                    >
-                      Download .seb configuration file
-                    </a>
-                  </p>
-                )}
-
-                {result && (
-                  <div className={`learner-receipt ${result.status === 'terminated_focus_lost' ? 'learner-terminated' : ''}`} role="status">
-                    <strong>
-                      {result.status === 'terminated_focus_lost'
-                        ? 'Attempt terminated — focus lost'
-                        : 'Attempt submitted'}
-                    </strong>
-                    <span>Submitted: {formatDateTime(result.submittedAt)} · Attempt {result.attemptCount} of {result.maxAttempts}</span>
-                    {result.status === 'terminated_focus_lost' && (
-                      <span>Your last server-acknowledged answers were saved and logged for mentor review.</span>
-                    )}
-                    <span>
-                      {result.resultsVisible
-                        ? `Score: ${result.score}${result.needsManualGrading ? ' (pending mentor review for manual items)' : ''}`
-                        : 'Results will be shown once released under the assessment feedback policy.'}
-                    </span>
-                  </div>
-                )}
-
-                {!result && selected.latestSubmission && (
-                  <div className={`learner-receipt ${selected.latestSubmission.status === 'terminated_focus_lost' ? 'learner-terminated' : ''}`}>
-                    <strong>
-                      {selected.latestSubmission.status === 'terminated_focus_lost'
-                        ? 'Latest submission (terminated — focus lost)'
-                        : `Latest submission (${selected.latestSubmission.status})`}
-                    </strong>
-                    <span>Submitted: {formatDateTime(selected.latestSubmission.submittedAt)}</span>
-                    <span>
-                      {selected.latestSubmission.resultsVisible
-                        ? `Score: ${selected.latestSubmission.score}`
-                        : 'Results hidden until released by your mentor.'}
-                    </span>
-                  </div>
-                )}
-
-                <button
-                  type="button"
-                  className="button button-primary"
-                  disabled={starting || selected.availabilityState !== 'open' || selected.attemptCount >= selected.maxAttempts}
-                  onClick={startAttempt}
-                >
-                  {starting ? 'Starting attempt…' : 'Start attempt (uses 1 attempt)'}
-                </button>
-              </div>
+              <LearnerBriefing
+                selected={selected}
+                menteeId={menteeId}
+                sebStatus={sebStatus}
+                fullscreenSupported={fullscreenSupported}
+                result={result}
+                starting={starting}
+                onStart={startAttempt}
+              />
             ) : (
-              <form
-                className="learner-runner"
-                onSubmit={(event) => {
-                  event.preventDefault()
-                  submitAttempt({ autoExpired: false })
-                }}
-              >
-                <div className="runner-status-bar">
-                  <div className="runner-timer" aria-live="polite">
-                    {remainingMs !== null
-                      ? <>Time remaining: <strong>{formatRemaining(remainingMs)}</strong></>
-                      : <span>Untimed attempt</span>}
-                  </div>
-                  <div className="runner-save-status" role="status">
-                    {saveState === 'saving' && 'Saving…'}
-                    {saveState === 'saved' && `Saved ${lastSavedAt ? new Date(lastSavedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : ''}`}
-                    {saveState === 'error' && 'Save pending — check connection'}
-                    {saveState === 'idle' && 'Autosave ready'}
-                    <button
-                      type="button"
-                      className="small-button"
-                      onClick={() => persistDraft(activeAttempt.id, answers)}
-                    >
-                      Save now
-                    </button>
-                  </div>
-                </div>
-
-                {(selected.requireFullscreen || selected.securityMode === 'strict_web') && fullscreenSupported && !isFullscreen && (
-                  <div className="runner-fullscreen-banner" role="note">
-                    <span>Full-screen mode is recommended for this assessment.</span>
-                    <button type="button" className="small-button" onClick={requestFullscreenMode}>Enter full-screen</button>
-                  </div>
-                )}
-
-                {selected.navigationMode === 'free' && activeQuestions.length > 1 && (
-                  <div className="runner-navigator" aria-label="Question navigator">
-                    {activeQuestions.map((q, idx) => {
-                      const answered = isQuestionAnswered(q, answers[q.id])
-                      return (
-                        <a
-                          key={q.id}
-                          href={`#question-${q.id}`}
-                          className={`nav-pill ${answered ? 'nav-pill-answered' : ''}`}
-                        >
-                          Q{idx + 1}
-                        </a>
-                      )
-                    })}
-                  </div>
-                )}
-
-                {selected.navigationMode === 'sequential' && (
-                  <p className="learner-attempts">
-                    Question {currentIndex + 1} of {activeQuestions.length} (sequential navigation)
-                  </p>
-                )}
-
-                {displayedQuestions.map(({ question, index }) => {
-                  const type = question.type || 'mcq'
-                  return (
-                    <fieldset className="learner-question" id={`question-${question.id}`} key={question.id}>
-                      <legend>
-                        {index + 1}. {question.prompt}
-                        <span className="learner-question-meta">
-                          {QUESTION_TYPE_LABELS[type] || type} · {question.points ?? 1} pts
-                          {type === 'multi_select' && question.partialCredit ? ' · Partial credit' : ''}
-                        </span>
-                      </legend>
-                      {question.instructions && <p className="learner-question-instructions">{question.instructions}</p>}
-
-                      {(type === 'mcq' || type === 'true_false') && question.options.map((option) => (
-                        <label key={option}>
-                          <input
-                            type="radio"
-                            name={question.id}
-                            checked={answers[question.id] === option}
-                            onChange={() => setAnswers((current) => ({ ...current, [question.id]: option }))}
-                          />
-                          {option}
-                        </label>
-                      ))}
-
-                      {type === 'multi_select' && question.options.map((option) => {
-                        const selectedList = Array.isArray(answers[question.id]) ? answers[question.id] : []
-                        return (
-                          <label key={option}>
-                            <input
-                              type="checkbox"
-                              checked={selectedList.includes(option)}
-                              onChange={() => toggleMultiSelect(question.id, option)}
-                            />
-                            {option}
-                          </label>
-                        )
-                      })}
-
-                      {type === 'short_answer' && (
-                        <input
-                          type="text"
-                          className="learner-text-input"
-                          maxLength={1000}
-                          placeholder="Type your answer..."
-                          value={answers[question.id] || ''}
-                          onChange={(event) => setAnswers((current) => ({ ...current, [question.id]: event.target.value }))}
-                        />
-                      )}
-
-                      {type === 'theory' && (
-                        <div className="learner-theory-wrap">
-                          <textarea
-                            rows={5}
-                            maxLength={20000}
-                            placeholder="Write your response..."
-                            value={answers[question.id] || ''}
-                            onChange={(event) => setAnswers((current) => ({ ...current, [question.id]: event.target.value }))}
-                          />
-                          <small className="learner-word-count">
-                            {(answers[question.id] || '').trim() ? (answers[question.id] || '').trim().split(/\s+/).length : 0} words
-                          </small>
-                        </div>
-                      )}
-
-                      {type === 'drawing' && (
-                        <DrawingCanvas
-                          value={answers[question.id] || { strokes: [], altText: '' }}
-                          onChange={(nextDrawing) => setAnswers((current) => ({ ...current, [question.id]: nextDrawing }))}
-                          altTextId={`drawing-alt-${question.id}`}
-                        />
-                      )}
-
-                      {question.rubric?.length > 0 && (
-                        <div className="learner-rubric">
-                          <strong>Grading rubric</strong>
-                          <ul>
-                            {question.rubric.map((item, rIndex) => (
-                              <li key={rIndex}>
-                                <strong>{item.criterion} ({item.points} pts)</strong>
-                                {item.description ? ` — ${item.description}` : ''}
-                              </li>
-                            ))}
-                          </ul>
-                        </div>
-                      )}
-                    </fieldset>
-                  )
-                })}
-
-                <div className="runner-actions">
-                  {selected.navigationMode === 'sequential' && currentIndex > 0 && (
-                    <button
-                      type="button"
-                      className="button button-secondary"
-                      onClick={() => navigateToQuestion(currentIndex - 1)}
-                    >
-                      Previous
-                    </button>
-                  )}
-                  {selected.navigationMode === 'sequential' && currentIndex < activeQuestions.length - 1 ? (
-                    <button
-                      type="button"
-                      className="button button-primary"
-                      onClick={() => navigateToQuestion(currentIndex + 1)}
-                    >
-                      Next question
-                    </button>
-                  ) : (
-                    <button className="button button-primary" type="submit" disabled={submitting}>
-                      {submitting ? 'Submitting…' : 'Submit assessment'}
-                    </button>
-                  )}
-                </div>
-              </form>
+              <LearnerRunner
+                selected={selected}
+                activeAttempt={activeAttempt}
+                activeQuestions={activeQuestions}
+                displayedQuestions={displayedQuestions}
+                currentIndex={currentIndex}
+                answers={answers}
+                setAnswers={setAnswers}
+                saveState={saveState}
+                lastSavedAt={lastSavedAt}
+                remainingMs={remainingMs}
+                fullscreenSupported={fullscreenSupported}
+                isFullscreen={isFullscreen}
+                submitting={submitting}
+                onSaveNow={() => persistDraft(activeAttempt.id, answers)}
+                onRequestFullscreen={requestFullscreenMode}
+                onToggleMultiSelect={toggleMultiSelect}
+                onNavigate={navigateToQuestion}
+                onSubmit={() => submitAttempt({ autoExpired: false })}
+              />
             )}
           </div>
         )}

@@ -1,0 +1,247 @@
+/* --- Learner Briefing, Timer & Autosave --- */
+
+.learner-briefing,
+.learner-runner {
+  display: grid;
+  gap: 14px;
+}
+
+.briefing-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  margin: 0;
+  padding: 12px;
+  border: 1px solid #eceef4;
+  border-radius: 9px;
+  background: #fafbfe;
+}
+
+.briefing-grid dt {
+  font-size: 9px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  color: #8c8e9e;
+}
+
+.briefing-grid dd {
+  margin: 3px 0 0;
+  font-size: 11px;
+  font-weight: 600;
+  color: #36374b;
+}
+
+.learner-receipt {
+  display: grid;
+  gap: 4px;
+  padding: 12px;
+  border: 1px solid #d5eee0;
+  border-radius: 9px;
+  background: #f3fbf7;
+  color: #2c6e4e;
+  font-size: 11px;
+}
+
+.runner-status-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid #e4e2fb;
+  border-radius: 9px;
+  background: #f8f7ff;
+  font-size: 11px;
+  color: #4a4c60;
+}
+
+.runner-save-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 10px;
+  color: #65687c;
+}
+
+.runner-navigator {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.nav-pill {
+  padding: 4px 9px;
+  border: 1px solid #dfe2ec;
+  border-radius: 999px;
+  background: #fff;
+  color: #55576b;
+  font-size: 10px;
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.nav-pill-answered {
+  border-color: #9e97eb;
+  background: #f0efff;
+  color: #5047bd;
+}
+
+.runner-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
+.learner-terminated {
+  border-color: #f3d2d7;
+  background: #fff7f8;
+  color: #8f3548;
+}
+
+.runner-fullscreen-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid #f0dfc2;
+  border-radius: 9px;
+  background: #fff9ee;
+  color: #8b6527;
+  font-size: 11px;
+}
+
+@media (max-width: 560px) {
+  .briefing-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* --- Reports, Pagination, Mentee History & Workspace Switcher --- */
+
+.reports-view {
+  display: grid;
+  gap: 18px;
+}
+
+.reports-view .welcome-row {
+  margin-bottom: 0;
+}
+
+.reports-stats-grid {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.report-breakdown-list {
+  display: grid;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.report-breakdown-list div {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 9px 11px;
+  border-radius: 8px;
+  background: #f8f9fc;
+  font-size: 11px;
+  color: #55576b;
+}
+
+.pagination-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 18px 14px;
+  border-top: 1px solid #f0f1f6;
+  font-size: 11px;
+  color: #77798b;
+}
+
+.pagination-buttons {
+  display: flex;
+  gap: 6px;
+}
+
+.mentee-history-sections {
+  display: grid;
+  gap: 14px;
+  max-height: 60vh;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+
+@media (max-width: 900px) {
+  .reports-stats-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 560px) {
+  .reports-stats-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.workspace-switcher {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0 10px 14px;
+}
+
+.workspace-switcher select {
+  flex: 1;
+  min-width: 0;
+  height: 34px;
+  padding: 0 8px;
+  border: 1px solid #e4e6ef;
+  border-radius: 8px;
+  background: #f8f9fc;
+  color: #25243b;
+  font: inherit;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.workspace-add-btn {
+  display: grid;
+  width: 34px;
+  height: 34px;
+  place-items: center;
+  border: 1px solid #e4e6ef;
+  border-radius: 8px;
+  background: #ffffff;
+  color: #5b52c9;
+  cursor: pointer;
+  font-size: 16px;
+  font-weight: 700;
+}
+
+.workspace-add-btn:hover {
+  background: #f0efff;
+}
+
+.workspace-create-form {
+  display: grid;
+  gap: 6px;
+  margin: 0 10px 14px;
+  padding: 10px;
+  border: 1px solid #e4e6ef;
+  border-radius: 10px;
+  background: #f8f9fc;
+}
+
+.workspace-create-form input {
+  width: 100%;
+  height: 32px;
+  padding: 0 8px;
+  border: 1px solid #d9dce8;
+  border-radius: 6px;
+  font: inherit;
+  font-size: 11px;
+}
