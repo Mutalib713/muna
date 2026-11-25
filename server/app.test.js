@@ -785,3 +785,103 @@ test('secure web mode logs visibility events, surfaces integrity flags, and enfo
 
   db.close()
 })
+
+test('assessment analytics, per-mentee history, formula-safe CSV export, and audit logs work end-to-end', async () => {
+  const db = createDatabase(':memory:')
+  const app = createApp({
+    db,
+    setupCode: 'test-setup-code',
+    sessionSecret: 'test-session-secret-long-enough-for-tests',
+  })
+  const client = request.agent(app)
+  const anonExport = await client.get('/api/assessments/AS-1/export.csv')
+  assert.equal(anonExport.status, 401)
+
+  const csrf = (await client.get('/api/auth/csrf')).body.csrfToken
+  const setup = await client.post('/api/auth/setup')
+    .set('X-CSRF-Token', csrf)
+    .send({
+      name: 'Mentor Lead',
+      email: 'mentor@example.test',
+      password: 'test-admin-password-2026',
+      confirmPassword: 'test-admin-password-2026',
+      setupCode: 'test-setup-code',
+    })
+  const adminCsrf = setup.body.csrfToken
+
+  const q1 = (await client.post('/api/questions').set('X-CSRF-Token', adminCsrf).send({
+    prompt: '1 + 1 = ?',
+    options: ['2', '3'],
+    correctAnswer: '2',
+    points: 2,
+  })).body.question
+  const q2 = (await client.post('/api/questions').set('X-CSRF-Token', adminCsrf).send({
+    type: 'theory',
+    prompt: 'Describe encryption.',
+    points: 4,
+  })).body.question
+
+  const mentee = (await client.post('/api/mentees').set('X-CSRF-Token', adminCsrf).send({
+    name: '=HYPERLINK("https://evil.example","Click")',
+    email: 'learner@example.test',
+  })).body.mentee
+
+  const assessment = (await client.post('/api/assessments').set('X-CSRF-Token', adminCsrf).send({
+    title: 'Security & Math Report',
+    questionIds: [q1.id, q2.id],
+    menteeIds: [mentee.id],
+    feedbackPolicy: 'manual',
+  })).body.assessment
+  await client.patch(`/api/assessments/${assessment.id}/status`).set('X-CSRF-Token', adminCsrf).send({ status: 'Published' })
+
+  const start = await client.post(`/api/learner/assessments/${assessment.id}/start`).send({ menteeId: mentee.id })
+  const attemptId = start.body.attempt.id
+  await client.post(`/api/learner/attempts/${attemptId}/security-events`).send({
+    menteeId: mentee.id,
+    eventType: 'visibility_hidden',
+  })
+  await client.post(`/api/learner/assessments/${assessment.id}/attempts`).send({
+    menteeId: mentee.id,
+    attemptId,
+    answers: { [q1.id]: '2', [q2.id]: 'Scrambles plaintext with a key.' },
+  })
+
+  // Release results + grant extra attempt -> both audit logged
+  await client.post(`/api/assessments/${assessment.id}/release-results`).set('X-CSRF-Token', adminCsrf)
+  await client.post(`/api/assessments/${assessment.id}/extra-attempts`)
+    .set('X-CSRF-Token', adminCsrf)
+    .send({ menteeId: mentee.id, extraAttempts: 1, reason: 'Accommodation' })
+
+  // Analytics & item analysis
+  const analytics = await client.get(`/api/assessments/${assessment.id}/analytics`)
+  assert.equal(analytics.status, 200)
+  assert.equal(analytics.body.summary.assignedCount, 1)
+  assert.equal(analytics.body.summary.completedCount, 1)
+  assert.equal(analytics.body.summary.completionRate, 100)
+  assert.equal(analytics.body.summary.securityEventCount, 1)
+  assert.equal(analytics.body.itemAnalysis.length, 2)
+  assert.equal(analytics.body.itemAnalysis[0].averagePercent, 100)
+  assert.equal(analytics.body.itemAnalysis[1].needsReviewCount, 1)
+
+  // Per-mentee history
+  const history = await client.get(`/api/mentees/${mentee.id}/history`)
+  assert.equal(history.status, 200)
+  assert.equal(history.body.attempts.length, 1)
+  assert.equal(history.body.securityEvents.length, 1)
+  assert.equal(history.body.extraAttemptGrants.length, 1)
+
+  // CSV export neutralizes formula injection and logs audit event
+  const csvRes = await client.get(`/api/assessments/${assessment.id}/export.csv`)
+  assert.equal(csvRes.status, 200)
+  assert.match(csvRes.headers['content-type'], /text\/csv/)
+  assert.ok(csvRes.text.includes("'=HYPERLINK"))
+
+  const auditRes = await client.get('/api/audit-logs')
+  assert.equal(auditRes.status, 200)
+  const actions = auditRes.body.auditLogs.map((l) => l.action)
+  assert.ok(actions.includes('export_csv'))
+  assert.ok(actions.includes('release_results'))
+  assert.ok(actions.includes('grant_extra_attempts'))
+
+  db.close()
+})

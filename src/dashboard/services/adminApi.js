@@ -58,7 +58,18 @@ export async function loadDashboardData() {
     organisation: membersData.organisation,
     members: membersData.members,
     invitations: invitationsData.invitations,
+    pagination: {
+      questions: questions.pagination,
+      answers: answers.pagination,
+      flags: flags.pagination,
+      mentees: mentees.pagination,
+      assessments: assessments.pagination,
+    },
   }
+}
+
+export function loadResourcePage(resource, page = 1) {
+  return apiRequest(`/${resource}?page=${encodeURIComponent(page)}`)
 }
 
 export default apiRequest

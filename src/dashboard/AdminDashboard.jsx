@@ -10,7 +10,7 @@ import DashboardTopbar from './components/DashboardTopbar'
 import FlagReviewModal from './components/FlagReviewModal'
 import QuestionModal from './components/QuestionModal'
 import HelpCenterModal from './components/HelpCenterModal'
-import apiRequest, { cacheCsrfToken, clearCsrfTokenCache, loadDashboardData, requestCsrfToken } from './services/adminApi'
+import apiRequest, { cacheCsrfToken, clearCsrfTokenCache, loadDashboardData, loadResourcePage, requestCsrfToken } from './services/adminApi'
 import './Dashboard.css'
 
 // Admin workspace dashboard (originally built by Priscilla Etornam Gbordjuer
@@ -39,6 +39,7 @@ export default function AdminDashboard() {
   const [flags, setFlags] = useState([])
   const [members, setMembers] = useState([])
   const [invitations, setInvitations] = useState([])
+  const [pagination, setPagination] = useState({})
   const [search, setSearch] = useState('')
   const [answerFilter, setAnswerFilter] = useState('All submissions')
   const [selectedAnswer, setSelectedAnswer] = useState(null)
@@ -228,6 +229,7 @@ export default function AdminDashboard() {
     setAssessments(data.assessments)
     setMembers(data.members)
     setInvitations(data.invitations)
+    setPagination(data.pagination || {})
   }
 
   function clearWorkspaceState() {
@@ -239,6 +241,7 @@ export default function AdminDashboard() {
     setMentees([])
     setMembers([])
     setInvitations([])
+    setPagination({})
     setSummary({ totalStudents: 0, totalQuestions: 0, weeklyActivity: [] })
   }
 
@@ -541,6 +544,22 @@ export default function AdminDashboard() {
     }
   }
 
+  async function goToPage(resource, page) {
+    try {
+      const data = await loadResourcePage(resource, page)
+      if (resource === 'questions') setQuestions(data.questions)
+      else if (resource === 'answers') setAnswers(data.answers)
+      else if (resource === 'flags') setFlags(data.flags)
+      else if (resource === 'mentees') setMentees(data.mentees)
+      else if (resource === 'assessments') setAssessments(data.assessments)
+      if (data.pagination) {
+        setPagination((current) => ({ ...current, [resource]: data.pagination }))
+      }
+    } catch (error) {
+      handleApiError(error)
+    }
+  }
+
   const navigate = (label) => {
     setActiveView(label)
     setSearch('')
@@ -559,7 +578,7 @@ export default function AdminDashboard() {
 
   const dashboard = {
     questions, answers, flags, search, summary, assessments, mentees, admin,
-    members, invitations,
+    members, invitations, pagination, goToPage,
     answerFilter, setAnswerFilter,
     pendingAnswers, unresolvedFlags, activeInvites,
     navigate, openQuestionModal, selectAnswer,

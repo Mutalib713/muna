@@ -1,10 +1,11 @@
 import { useMemo, useState } from 'react'
 import Icon from '../DashboardIcon'
+import PaginationBar from '../components/PaginationBar'
 import { QUESTION_TYPE_LABELS, QUESTION_TYPE_OPTIONS, summarizeAnswerKey } from '../questionTypes'
 
 // Receives the `dashboard` context bag from AdminDashboard.jsx.
 export default function QuestionBank({ dashboard }) {
-  const { questions, search, openQuestionModal, downloadTemplate, handleQuestionUpload, uploadMessage, uploadError, fileInput, editQuestion, deleteQuestion } = dashboard
+  const { questions, pagination, goToPage, search, openQuestionModal, downloadTemplate, handleQuestionUpload, uploadMessage, uploadError, fileInput, editQuestion, deleteQuestion } = dashboard
   const [typeFilter, setTypeFilter] = useState('All types')
 
   const filteredQuestions = useMemo(() => questions.filter((question) => {
@@ -51,6 +52,7 @@ export default function QuestionBank({ dashboard }) {
           })}
           {filteredQuestions.length === 0 && <tr><td className="empty-row" colSpan="5">No questions match your search.</td></tr>}
         </tbody></table></div>
+        <PaginationBar pagination={pagination?.questions} onPageChange={(page) => goToPage('questions', page)} />
       </section>
     </>
   )

@@ -1,4 +1,5 @@
 import { useMemo, useState } from 'react'
+import PaginationBar from '../components/PaginationBar'
 import { formatDateTime } from '../format'
 import { QUESTION_TYPE_LABELS } from '../questionTypes'
 import './Assessments.css'
@@ -57,6 +58,8 @@ export default function Assessments({ dashboard }) {
     questions,
     assessments,
     mentees,
+    pagination,
+    goToPage,
     search,
     createAssessment: saveAssessment,
     updateAssessment: saveAssessmentChanges,
@@ -339,6 +342,7 @@ export default function Assessments({ dashboard }) {
           <p>{assessments.length ? 'Try another title or mentee name.' : 'Create an assessment using questions from your question bank.'}</p>
           {!assessments.length && <button className="button button-primary" onClick={() => setModalOpen(true)}>Create your first assessment</button>}
         </div>}
+        <PaginationBar pagination={pagination?.assessments} onPageChange={(page) => goToPage('assessments', page)} />
       </section>
 
       <p className="assessment-data-note">Assessment rules, autosave drafts, and attempts are saved in SQLite. Mentee attempts can be opened at <code>#/learner/&lt;mentee-id&gt;</code>.</p>

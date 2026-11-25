@@ -159,6 +159,17 @@ export function createDatabase(filename) {
       ON security_events (attempt_id, server_timestamp);
     CREATE INDEX IF NOT EXISTS security_events_mentee_idx
       ON security_events (mentee_id, server_timestamp);
+    CREATE TABLE IF NOT EXISTS audit_logs (
+      id TEXT PRIMARY KEY,
+      actor TEXT NOT NULL,
+      action TEXT NOT NULL,
+      entity_type TEXT NOT NULL,
+      entity_id TEXT NOT NULL,
+      detail_json TEXT NOT NULL DEFAULT '{}',
+      created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS audit_logs_created_idx
+      ON audit_logs (created_at);
     CREATE TABLE IF NOT EXISTS extra_attempt_grants (
       id TEXT PRIMARY KEY,
       assessment_id TEXT NOT NULL REFERENCES assessments(id) ON DELETE CASCADE,
@@ -454,6 +465,18 @@ export function securityEventFromRow(row) {
     detail: row.detail,
     clientTimestamp: row.client_timestamp || null,
     serverTimestamp: row.server_timestamp,
+  }
+}
+
+export function auditLogFromRow(row) {
+  return {
+    id: row.id,
+    actor: row.actor,
+    action: row.action,
+    entityType: row.entity_type,
+    entityId: row.entity_id,
+    detail: parseJson(row.detail_json, {}),
+    createdAt: row.created_at,
   }
 }
 

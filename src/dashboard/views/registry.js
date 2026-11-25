@@ -6,6 +6,7 @@ import IntegrityFlags from './IntegrityFlags'
 import Mentees from './Mentees'
 import Members from './Members'
 import Invitations from './Invitations'
+import Reports from './Reports'
 
 // One view = one file. To add a dashboard view:
 //   1. Create the component in src/dashboard/views/
@@ -20,6 +21,7 @@ export const dashboardViews = [
   { label: 'Assessments', icon: 'file', Component: Assessments },
   { label: 'Answer review', icon: 'check', Component: AnswerReview, badge: 'answers' },
   { label: 'Integrity flags', icon: 'shield', Component: IntegrityFlags, badge: 'flags' },
+  { label: 'Reports', icon: 'chart', Component: Reports },
   { label: 'Mentees', icon: 'users', Component: Mentees },
   { label: 'Members', icon: 'users', Component: Members },
   { label: 'Invitations', icon: 'mail', Component: Invitations, badge: 'invites' },

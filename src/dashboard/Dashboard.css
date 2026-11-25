@@ -2226,3 +2226,71 @@ tbody tr:nth-child(3n) .student-avatar {
     grid-template-columns: 1fr;
   }
 }
+
+/* --- Reports, Pagination & Mentee History --- */
+
+.reports-view {
+  display: grid;
+  gap: 18px;
+}
+
+.reports-view .welcome-row {
+  margin-bottom: 0;
+}
+
+.reports-stats-grid {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.report-breakdown-list {
+  display: grid;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.report-breakdown-list div {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 9px 11px;
+  border-radius: 8px;
+  background: #f8f9fc;
+  font-size: 11px;
+  color: #55576b;
+}
+
+.pagination-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 18px 14px;
+  border-top: 1px solid #f0f1f6;
+  font-size: 11px;
+  color: #77798b;
+}
+
+.pagination-buttons {
+  display: flex;
+  gap: 6px;
+}
+
+.mentee-history-sections {
+  display: grid;
+  gap: 14px;
+  max-height: 60vh;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+
+@media (max-width: 900px) {
+  .reports-stats-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 560px) {
+  .reports-stats-grid {
+    grid-template-columns: 1fr;
+  }
+}
