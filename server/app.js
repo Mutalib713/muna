@@ -87,6 +87,25 @@ function validateAssessment(input) {
   return null
 }
 
+function validateMentee(input) {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return 'Mentee details are required.'
+  const name = typeof input.name === 'string' ? input.name.trim() : ''
+  const email = typeof input.email === 'string' ? input.email.trim().toLowerCase() : ''
+  if (!name || name.length > 120) return 'Mentee name must contain 1 to 120 characters.'
+  if (!email || email.length > 254 || !email.includes('@')) return 'A valid mentee email is required.'
+  return null
+}
+
+function initialsFor(name) {
+  return name.split(/\s+/).filter(Boolean).map((part) => part[0]).join('').slice(0, 2).toUpperCase()
+}
+
+function pagination(req, defaultLimit = 25) {
+  const page = Math.max(1, Number.parseInt(req.query.page, 10) || 1)
+  const limit = Math.min(100, Math.max(1, Number.parseInt(req.query.limit, 10) || defaultLimit))
+  return { page, limit, offset: (page - 1) * limit }
+}
+
 function addQuestion(db, input) {
   const question = {
     id: `Q-${randomUUID().slice(0, 8).toUpperCase()}`,
@@ -218,6 +237,129 @@ export function createApp({ db, adminEmail, adminName = 'Administrator', passwor
   router.get('/questions', (req, res) => {
     const rows = db.prepare('SELECT * FROM questions ORDER BY created_at DESC, id DESC').all()
     res.json({ questions: rows.map(questionFromRow) })
+  router.get('/learner/assessments/:menteeId', (req, res) => {
+    const mentee = db.prepare('SELECT * FROM mentees WHERE id = ?').get(req.params.menteeId)
+    if (!mentee) {
+      res.status(404).json({ error: 'Mentee not found.' })
+      return
+    }
+    const rows = db.prepare(`
+      SELECT a.* FROM assessments a
+      JOIN assessment_assignments aa ON aa.assessment_id = a.id
+      WHERE aa.mentee_id = ? AND a.status = 'Published'
+      ORDER BY a.created_at DESC
+    `).all(req.params.menteeId)
+    res.json({
+      assessments: rows.map((row) => {
+        const questionIds = db.prepare(`
+          SELECT question_id FROM assessment_questions
+          WHERE assessment_id = ? ORDER BY position
+        `).all(row.id).map((item) => item.question_id)
+        const questions = questionIds.map((id) => {
+          const question = db.prepare('SELECT * FROM questions WHERE id = ?').get(id)
+          const publicQuestion = questionFromRow(question)
+          delete publicQuestion.correctAnswer
+          delete publicQuestion.status
+          return publicQuestion
+        })
+        const attemptCount = db.prepare(`
+          SELECT COUNT(*) AS count FROM assessment_attempts
+          WHERE assessment_id = ? AND mentee_id = ?
+        `).get(row.id, req.params.menteeId).count
+        return {
+          id: row.id,
+          title: row.title,
+          description: row.description,
+          maxAttempts: row.max_attempts,
+          attemptCount,
+          questions,
+        }
+      }),
+    })
+  })
+
+  router.post('/learner/assessments/:id/attempts', (req, res) => {
+    const assessment = db.prepare('SELECT * FROM assessments WHERE id = ?').get(req.params.id)
+    if (!assessment) {
+      res.status(404).json({ error: 'Assessment not found.' })
+      return
+    }
+    if (assessment.status !== 'Published') {
+      res.status(400).json({ error: 'This assessment is not accepting attempts.' })
+      return
+    }
+    const menteeId = typeof req.body?.menteeId === 'string' ? req.body.menteeId : ''
+    const assignment = db.prepare(`
+      SELECT 1 FROM assessment_assignments
+      WHERE assessment_id = ? AND mentee_id = ?
+    `).get(req.params.id, menteeId)
+    const mentee = db.prepare('SELECT * FROM mentees WHERE id = ?').get(menteeId)
+    if (!assignment || !mentee) {
+      res.status(403).json({ error: 'This assessment is not assigned to the mentee.' })
+      return
+    }
+    const attemptCount = db.prepare(`
+      SELECT COUNT(*) AS count FROM assessment_attempts
+      WHERE assessment_id = ? AND mentee_id = ?
+    `).get(req.params.id, menteeId).count
+    if (attemptCount >= assessment.max_attempts) {
+      res.status(409).json({ error: 'The maximum number of attempts has been reached.' })
+      return
+    }
+    const submittedAnswers = req.body?.answers
+    if (!submittedAnswers || typeof submittedAnswers !== 'object' || Array.isArray(submittedAnswers)) {
+      res.status(400).json({ error: 'Submitted answers are required.' })
+      return
+    }
+    const questionRows = db.prepare(`
+      SELECT q.* FROM assessment_questions aq
+      JOIN questions q ON q.id = aq.question_id
+      WHERE aq.assessment_id = ? ORDER BY aq.position
+    `).all(req.params.id)
+    let correctCount = 0
+    const answerDetails = questionRows.map((question) => {
+      const publicAnswer = typeof submittedAnswers[question.id] === 'string' ? submittedAnswers[question.id].trim() : ''
+      if (publicAnswer === question.correct_answer) correctCount++
+      return { questionId: question.id, answer: publicAnswer }
+    })
+    if (answerDetails.some((item) => !item.answer)) {
+      res.status(400).json({ error: 'Answer every question before submitting.' })
+      return
+    }
+    const score = `${correctCount} / ${questionRows.length}`
+    const now = new Date().toISOString()
+    const attemptId = `AT-${randomUUID().slice(0, 8).toUpperCase()}`
+    const answerId = `A-${randomUUID().slice(0, 8).toUpperCase()}`
+    const answerSummary = answerDetails.map((item) => {
+      const question = questionRows.find((row) => row.id === item.questionId)
+      return `${question.prompt}: ${item.answer}`
+    }).join('\n')
+    const submitAttempt = db.transaction(() => {
+      db.prepare(`
+        INSERT INTO assessment_attempts (id, assessment_id, mentee_id, answers_json, score, submitted_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+      `).run(attemptId, req.params.id, menteeId, JSON.stringify(answerDetails), score, now)
+      db.prepare(`
+        INSERT INTO answers (id, student, initials, assessment, answer, score, submitted_at, status)
+        VALUES (?, ?, ?, ?, ?, ?, ?, 'Needs review')
+      `).run(answerId, mentee.name, initialsFor(mentee.name), assessment.title, answerSummary, score, now)
+    })
+    submitAttempt()
+    res.status(201).json({
+      attempt: { id: attemptId, score, submittedAt: now, attemptCount: attemptCount + 1, maxAttempts: assessment.max_attempts },
+    })
+  })
+
+  router.use(requireAdmin)
+
+  router.get('/questions', (req, res) => {
+    const { page, limit, offset } = pagination(req)
+    const search = typeof req.query.search === 'string' ? req.query.search.trim().toLowerCase() : ''
+    const where = search ? 'WHERE lower(prompt) LIKE ? OR lower(id) LIKE ?' : ''
+    const params = search ? [`%${search}%`, `%${search}%`] : []
+    const total = db.prepare(`SELECT COUNT(*) AS count FROM questions ${where}`).get(...params).count
+    const rows = db.prepare(`SELECT * FROM questions ${where} ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`).all(...params, limit, offset)
+    res.json({ questions: rows.map(questionFromRow), pagination: { page, limit, total, pages: Math.max(1, Math.ceil(total / limit)) } })
   })
 
   router.post('/questions', verifyCsrf, (req, res) => {
@@ -253,6 +395,107 @@ export function createApp({ db, adminEmail, adminName = 'Administrator', passwor
   router.get('/assessments', (req, res) => {
     const rows = db.prepare('SELECT * FROM assessments ORDER BY created_at DESC, id DESC').all()
     res.json({ assessments: rows.map((row) => assessmentFromRow(db, row)) })
+  router.patch('/questions/:id', verifyCsrf, (req, res) => {
+    const validationError = validateQuestion(req.body)
+    if (validationError) {
+      res.status(400).json({ error: validationError })
+      return
+    }
+    const existing = db.prepare('SELECT * FROM questions WHERE id = ?').get(req.params.id)
+    if (!existing) {
+      res.status(404).json({ error: 'Question not found.' })
+      return
+    }
+    db.prepare(`
+      UPDATE questions
+      SET prompt = ?, options_json = ?, correct_answer = ?, status = 'Published'
+      WHERE id = ?
+    `).run(req.body.prompt.trim(), JSON.stringify(req.body.options.map((option) => option.trim())), req.body.correctAnswer.trim(), req.params.id)
+    const row = db.prepare('SELECT * FROM questions WHERE id = ?').get(req.params.id)
+    res.json({ question: questionFromRow(row) })
+  })
+
+  router.delete('/questions/:id', verifyCsrf, (req, res) => {
+    const inUse = db.prepare('SELECT COUNT(*) AS count FROM assessment_questions WHERE question_id = ?').get(req.params.id).count
+    if (inUse) {
+      res.status(409).json({ error: 'This question is used by one or more assessments and cannot be deleted.' })
+      return
+    }
+    const deleted = db.prepare('DELETE FROM questions WHERE id = ?').run(req.params.id)
+    if (!deleted.changes) {
+      res.status(404).json({ error: 'Question not found.' })
+      return
+    }
+    res.json({ ok: true })
+  })
+
+  router.get('/mentees', (req, res) => {
+    const { page, limit, offset } = pagination(req)
+    const search = typeof req.query.search === 'string' ? req.query.search.trim().toLowerCase() : ''
+    const where = search ? 'WHERE lower(name) LIKE ? OR lower(email) LIKE ?' : ''
+    const params = search ? [`%${search}%`, `%${search}%`] : []
+    const total = db.prepare(`SELECT COUNT(*) AS count FROM mentees ${where}`).get(...params).count
+    const rows = db.prepare(`SELECT * FROM mentees ${where} ORDER BY name LIMIT ? OFFSET ?`).all(...params, limit, offset)
+    res.json({ mentees: rows.map(menteeFromRow), pagination: { page, limit, total, pages: Math.max(1, Math.ceil(total / limit)) } })
+  })
+
+  router.post('/mentees', verifyCsrf, (req, res) => {
+    const validationError = validateMentee(req.body)
+    if (validationError) {
+      res.status(400).json({ error: validationError })
+      return
+    }
+    const name = req.body.name.trim()
+    const email = req.body.email.trim().toLowerCase()
+    const existing = db.prepare('SELECT id FROM mentees WHERE lower(email) = ?').get(email)
+    if (existing) {
+      res.status(409).json({ error: 'A mentee with this email already exists.' })
+      return
+    }
+    const mentee = { id: `M-${randomUUID().slice(0, 8).toUpperCase()}`, name, email }
+    db.prepare('INSERT INTO mentees (id, name, email) VALUES (?, ?, ?)').run(mentee.id, name, email)
+    res.status(201).json({ mentee: menteeFromRow({ ...mentee }) })
+  })
+
+  router.patch('/mentees/:id', verifyCsrf, (req, res) => {
+    const validationError = validateMentee(req.body)
+    if (validationError) {
+      res.status(400).json({ error: validationError })
+      return
+    }
+    const existing = db.prepare('SELECT * FROM mentees WHERE id = ?').get(req.params.id)
+    if (!existing) {
+      res.status(404).json({ error: 'Mentee not found.' })
+      return
+    }
+    const name = req.body.name.trim()
+    const email = req.body.email.trim().toLowerCase()
+    const duplicate = db.prepare('SELECT id FROM mentees WHERE lower(email) = ? AND id != ?').get(email, req.params.id)
+    if (duplicate) {
+      res.status(409).json({ error: 'A mentee with this email already exists.' })
+      return
+    }
+    db.prepare('UPDATE mentees SET name = ?, email = ? WHERE id = ?').run(name, email, req.params.id)
+    res.json({ mentee: menteeFromRow(db.prepare('SELECT * FROM mentees WHERE id = ?').get(req.params.id)) })
+  })
+
+  router.delete('/mentees/:id', verifyCsrf, (req, res) => {
+    const deleted = db.prepare('DELETE FROM mentees WHERE id = ?').run(req.params.id)
+    if (!deleted.changes) {
+      res.status(404).json({ error: 'Mentee not found.' })
+      return
+    }
+    res.json({ ok: true })
+  })
+
+  router.get('/assessments', (req, res) => {
+    const { page, limit, offset } = pagination(req)
+    const search = typeof req.query.search === 'string' ? req.query.search.trim().toLowerCase() : ''
+    const where = search ? 'WHERE lower(title) LIKE ? OR lower(description) LIKE ?' : ''
+    const params = search ? [`%${search}%`, `%${search}%`] : []
+    const total = db.prepare(`SELECT COUNT(*) AS count FROM assessments ${where}`).get(...params).count
+    const rows = db.prepare(`SELECT * FROM assessments ${where} ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`).all(...params, limit, offset)
+    res.json({ assessments: rows.map((row) => assessmentFromRow(db, row)), pagination: { page, limit, total, pages: Math.max(1, Math.ceil(total / limit)) } })
   })
 
   router.post('/assessments', verifyCsrf, (req, res) => {
@@ -325,6 +568,83 @@ export function createApp({ db, adminEmail, adminName = 'Administrator', passwor
       ...answerFromRow(row),
       reviewHistory: getReviewHistory(db, 'answer', row.id),
     })) })
+  router.patch('/assessments/:id', verifyCsrf, (req, res) => {
+    const existing = db.prepare('SELECT * FROM assessments WHERE id = ?').get(req.params.id)
+    if (!existing) {
+      res.status(404).json({ error: 'Assessment not found.' })
+      return
+    }
+    if (existing.status !== 'Draft') {
+      res.status(409).json({ error: 'Only draft assessments can be edited.' })
+      return
+    }
+    const validationError = validateAssessment(req.body)
+    if (validationError) {
+      res.status(400).json({ error: validationError })
+      return
+    }
+    const questionPlaceholders = req.body.questionIds.map(() => '?').join(', ')
+    const menteePlaceholders = req.body.menteeIds.map(() => '?').join(', ')
+    const foundQuestions = db.prepare(`SELECT COUNT(*) AS count FROM questions WHERE id IN (${questionPlaceholders})`).get(...req.body.questionIds).count
+    const foundMentees = db.prepare(`SELECT COUNT(*) AS count FROM mentees WHERE id IN (${menteePlaceholders})`).get(...req.body.menteeIds).count
+    if (foundQuestions !== req.body.questionIds.length || foundMentees !== req.body.menteeIds.length) {
+      res.status(400).json({ error: 'Choose existing questions and mentees from this workspace.' })
+      return
+    }
+    const now = new Date().toISOString()
+    const updateAssessment = db.transaction(() => {
+      db.prepare(`
+        UPDATE assessments
+        SET title = ?, description = ?, max_attempts = ?, updated_at = ?
+        WHERE id = ?
+      `).run(req.body.title.trim(), (req.body.description || '').trim(), req.body.maxAttempts ?? 3, now, req.params.id)
+      db.prepare('DELETE FROM assessment_questions WHERE assessment_id = ?').run(req.params.id)
+      db.prepare('DELETE FROM assessment_assignments WHERE assessment_id = ?').run(req.params.id)
+      const insertQuestion = db.prepare('INSERT INTO assessment_questions (assessment_id, question_id, position) VALUES (?, ?, ?)')
+      req.body.questionIds.forEach((questionId, index) => insertQuestion.run(req.params.id, questionId, index))
+      const insertAssignment = db.prepare('INSERT INTO assessment_assignments (assessment_id, mentee_id, assigned_at) VALUES (?, ?, ?)')
+      req.body.menteeIds.forEach((menteeId) => insertAssignment.run(req.params.id, menteeId, now))
+    })
+    updateAssessment()
+    const row = db.prepare('SELECT * FROM assessments WHERE id = ?').get(req.params.id)
+    res.json({ assessment: assessmentFromRow(db, row) })
+  })
+
+  router.delete('/assessments/:id', verifyCsrf, (req, res) => {
+    const existing = db.prepare('SELECT * FROM assessments WHERE id = ?').get(req.params.id)
+    if (!existing) {
+      res.status(404).json({ error: 'Assessment not found.' })
+      return
+    }
+    if (existing.status !== 'Draft') {
+      res.status(409).json({ error: 'Only draft assessments can be deleted.' })
+      return
+    }
+    db.prepare('DELETE FROM assessments WHERE id = ?').run(req.params.id)
+    res.json({ ok: true })
+  })
+
+  router.get('/answers', (req, res) => {
+    const { page, limit, offset } = pagination(req)
+    const search = typeof req.query.search === 'string' ? req.query.search.trim().toLowerCase() : ''
+    const status = typeof req.query.status === 'string' ? req.query.status : ''
+    const clauses = []
+    const params = []
+    if (search) {
+      clauses.push('(lower(student) LIKE ? OR lower(assessment) LIKE ? OR lower(answer) LIKE ?)')
+      params.push(`%${search}%`, `%${search}%`, `%${search}%`)
+    }
+    if (status) {
+      clauses.push('(status = ? OR review_decision = ?)')
+      params.push(status, status)
+    }
+    const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : ''
+    const total = db.prepare(`SELECT COUNT(*) AS count FROM answers ${where}`).get(...params).count
+    const rows = db.prepare(`SELECT * FROM answers ${where} ORDER BY submitted_at DESC LIMIT ? OFFSET ?`).all(...params, limit, offset)
+    res.json({
+      answers: rows.map((row) => ({ ...answerFromRow(row), reviewHistory: getReviewHistory(db, 'answer', row.id) })),
+      pagination: { page, limit, total, pages: Math.max(1, Math.ceil(total / limit)) },
+    })
   })
 
   router.patch('/answers/:id/review', verifyCsrf, (req, res) => {
@@ -370,6 +690,34 @@ export function createApp({ db, adminEmail, adminName = 'Administrator', passwor
       ...flagFromRow(row),
       reviewHistory: getReviewHistory(db, 'flag', row.id),
     })) })
+    const { page, limit, offset } = pagination(req)
+    const search = typeof req.query.search === 'string' ? req.query.search.trim().toLowerCase() : ''
+    const where = search ? 'WHERE lower(student) LIKE ? OR lower(assessment) LIKE ? OR lower(signal) LIKE ?' : ''
+    const params = search ? [`%${search}%`, `%${search}%`, `%${search}%`] : []
+    const total = db.prepare(`SELECT COUNT(*) AS count FROM flags ${where}`).get(...params).count
+    const rows = db.prepare(`SELECT * FROM flags ${where} ORDER BY id DESC LIMIT ? OFFSET ?`).all(...params, limit, offset)
+    res.json({
+      flags: rows.map((row) => ({ ...flagFromRow(row), reviewHistory: getReviewHistory(db, 'flag', row.id) })),
+      pagination: { page, limit, total, pages: Math.max(1, Math.ceil(total / limit)) },
+    })
+  })
+
+  router.post('/flags', verifyCsrf, (req, res) => {
+    const student = typeof req.body?.student === 'string' ? req.body.student.trim() : ''
+    const assessment = typeof req.body?.assessment === 'string' ? req.body.assessment.trim() : ''
+    const signal = typeof req.body?.signal === 'string' ? req.body.signal.trim() : ''
+    const detail = typeof req.body?.detail === 'string' ? req.body.detail.trim() : ''
+    if (!student || !assessment || !signal || !detail) {
+      res.status(400).json({ error: 'Student, assessment, signal, and detail are required.' })
+      return
+    }
+    const id = `F-${randomUUID().slice(0, 8).toUpperCase()}`
+    db.prepare(`
+      INSERT INTO flags (id, student, initials, assessment, signal, detail, level)
+      VALUES (?, ?, ?, ?, ?, ?, 'Needs review')
+    `).run(id, student, initialsFor(student), assessment, signal, detail)
+    const row = db.prepare('SELECT * FROM flags WHERE id = ?').get(id)
+    res.status(201).json({ flag: { ...flagFromRow(row), reviewHistory: [] } })
   })
 
   router.patch('/flags/:id/review', verifyCsrf, (req, res) => {
