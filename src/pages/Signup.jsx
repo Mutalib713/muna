@@ -2,7 +2,7 @@ import { useState } from 'react'
 import Button from '../components/ui/Button'
 import Input from '../components/ui/Input'
 import { ShieldCheck } from '../icons'
-import apiRequest, { requestCsrfToken } from '../dashboard/services/adminApi'
+import apiRequest, { cacheCsrfToken, requestCsrfToken } from '../dashboard/services/adminApi'
 
 export default function Signup() {
   const [role, setRole] = useState(
@@ -17,24 +17,39 @@ export default function Signup() {
   const [invitationCode, setInvitationCode] = useState('')
   const [notice, setNotice] = useState('')
   const [joinedResult, setJoinedResult] = useState(null)
+  const [mentorSignupResult, setMentorSignupResult] = useState(null)
   const [submitting, setSubmitting] = useState(false)
 
   const handleSubmit = async (event) => {
     event.preventDefault()
     setNotice('')
     setJoinedResult(null)
-    if (role === 'mentor') {
-      setNotice("Mentor workspace signup isn't connected yet. Use the admin workspace or accept an invitation code.")
-      return
-    }
-    const token = invitationCode.trim()
-    if (!token) {
-      setNotice('Enter the invitation code from your mentor.')
-      return
-    }
+    setMentorSignupResult(null)
     setSubmitting(true)
     try {
       const { csrfToken } = await requestCsrfToken()
+      if (role === 'mentor') {
+        const result = await apiRequest('/auth/signup', {
+          method: 'POST',
+          body: {
+            name,
+            email,
+            password,
+            organisationName: organisation,
+          },
+          csrfToken,
+        })
+        if (result.csrfToken) cacheCsrfToken(result.csrfToken)
+        setMentorSignupResult(result)
+        setNotice(`Workspace "${result.organisation.name}" created. Verify your email address to activate it.`)
+        return
+      }
+
+      const token = invitationCode.trim()
+      if (!token) {
+        setNotice('Enter the invitation code from your mentor.')
+        return
+      }
       const result = await apiRequest(`/invitations/${encodeURIComponent(token)}/accept`, {
         method: 'POST',
         body: { name, email, password },
@@ -170,6 +185,20 @@ export default function Signup() {
               />
             )}
             {notice && <p className="auth-notice" role="status">{notice}</p>}
+            {mentorSignupResult && (
+              <a
+                className="auth-home-link"
+                href={
+                  mentorSignupResult.verificationToken
+                    ? `/verify-email?token=${encodeURIComponent(mentorSignupResult.verificationToken)}`
+                    : '/verify-email'
+                }
+              >
+                {mentorSignupResult.verificationToken
+                  ? 'Verify email and open your workspace'
+                  : 'Go to email verification'}
+              </a>
+            )}
             {joinedResult?.menteeId && (
               <a className="auth-home-link" href={`/#/learner/${encodeURIComponent(joinedResult.menteeId)}`}>
                 Open your assigned assessments (ID: {joinedResult.menteeId})

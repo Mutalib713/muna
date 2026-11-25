@@ -8,7 +8,7 @@ function initialsFor(name) {
   return name.split(' ').map((part) => part[0]).join('').slice(0, 2).toUpperCase()
 }
 
-export default function DashboardTopbar({ activeView, search, admin, onSearch, onLogout }) {
+export default function DashboardTopbar({ activeView, search, admin, organisation, onSearch, onLogout }) {
   const searchInput = useRef(null)
 
   useEffect(() => {
@@ -25,7 +25,7 @@ export default function DashboardTopbar({ activeView, search, admin, onSearch, o
 
   return (
     <header className="topbar">
-      <div className="breadcrumb">Workspace <span>/</span> <strong>{activeView}</strong></div>
+      <div className="breadcrumb">{organisation?.name || 'Workspace'} <span>/</span> <strong>{activeView}</strong></div>
       <div className="topbar-actions">
         <label className="search-box"><Icon name="search" size={17} /><input ref={searchInput} type="search" placeholder="Search this view..." value={search} onChange={(event) => onSearch(event.target.value)} aria-label="Search current view" /><kbd>{searchShortcut}</kbd></label>
         <button className="logout-button" onClick={onLogout}>Sign out</button>

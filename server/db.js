@@ -26,6 +26,7 @@ export function createDatabase(filename) {
   db.exec(`
     CREATE TABLE IF NOT EXISTS questions (
       id TEXT PRIMARY KEY,
+      organisation_id TEXT NOT NULL DEFAULT 'ORG-DEFAULT',
       type TEXT NOT NULL DEFAULT 'mcq',
       prompt TEXT NOT NULL,
       options_json TEXT NOT NULL,
@@ -40,6 +41,7 @@ export function createDatabase(filename) {
     );
     CREATE TABLE IF NOT EXISTS answers (
       id TEXT PRIMARY KEY,
+      organisation_id TEXT NOT NULL DEFAULT 'ORG-DEFAULT',
       student TEXT NOT NULL,
       initials TEXT NOT NULL,
       assessment TEXT NOT NULL,
@@ -58,6 +60,7 @@ export function createDatabase(filename) {
     );
     CREATE TABLE IF NOT EXISTS flags (
       id TEXT PRIMARY KEY,
+      organisation_id TEXT NOT NULL DEFAULT 'ORG-DEFAULT',
       student TEXT NOT NULL,
       initials TEXT NOT NULL,
       assessment TEXT NOT NULL,
@@ -83,11 +86,14 @@ export function createDatabase(filename) {
       ON review_history (entity_type, entity_id, created_at);
     CREATE TABLE IF NOT EXISTS mentees (
       id TEXT PRIMARY KEY,
+      organisation_id TEXT NOT NULL DEFAULT 'ORG-DEFAULT',
       name TEXT NOT NULL,
-      email TEXT NOT NULL UNIQUE
+      email TEXT NOT NULL,
+      UNIQUE (organisation_id, email)
     );
     CREATE TABLE IF NOT EXISTS assessments (
       id TEXT PRIMARY KEY,
+      organisation_id TEXT NOT NULL DEFAULT 'ORG-DEFAULT',
       title TEXT NOT NULL,
       description TEXT NOT NULL DEFAULT '',
       max_attempts INTEGER NOT NULL DEFAULT 3 CHECK (max_attempts BETWEEN 1 AND 3),
@@ -161,6 +167,7 @@ export function createDatabase(filename) {
       ON security_events (mentee_id, server_timestamp);
     CREATE TABLE IF NOT EXISTS audit_logs (
       id TEXT PRIMARY KEY,
+      organisation_id TEXT NOT NULL DEFAULT 'ORG-DEFAULT',
       actor TEXT NOT NULL,
       action TEXT NOT NULL,
       entity_type TEXT NOT NULL,
@@ -234,6 +241,14 @@ export function createDatabase(filename) {
     );
     CREATE INDEX IF NOT EXISTS invitations_org_idx
       ON invitations (organisation_id, created_at);
+    CREATE TABLE IF NOT EXISTS email_verification_tokens (
+      token_hash TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      expires_at TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS email_verification_user_idx
+      ON email_verification_tokens (user_id);
   `)
 
   function ensureColumn(table, column, definition) {
@@ -243,6 +258,11 @@ export function createDatabase(filename) {
     }
   }
 
+  ensureColumn('questions', 'organisation_id', "TEXT NOT NULL DEFAULT 'ORG-DEFAULT'")
+  ensureColumn('answers', 'organisation_id', "TEXT NOT NULL DEFAULT 'ORG-DEFAULT'")
+  ensureColumn('flags', 'organisation_id', "TEXT NOT NULL DEFAULT 'ORG-DEFAULT'")
+  ensureColumn('assessments', 'organisation_id', "TEXT NOT NULL DEFAULT 'ORG-DEFAULT'")
+  ensureColumn('audit_logs', 'organisation_id', "TEXT NOT NULL DEFAULT 'ORG-DEFAULT'")
   ensureColumn('questions', 'type', "TEXT NOT NULL DEFAULT 'mcq'")
   ensureColumn('questions', 'points', 'REAL NOT NULL DEFAULT 1')
   ensureColumn('questions', 'difficulty', "TEXT NOT NULL DEFAULT 'Medium'")
@@ -323,6 +343,37 @@ export function createDatabase(filename) {
     db.pragma('foreign_keys = ON')
   }
 
+  const menteesTableSql = db.prepare(
+    "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'mentees'"
+  ).get()?.sql || ''
+  if (menteesTableSql && !menteesTableSql.includes('organisation_id')) {
+    db.pragma('foreign_keys = OFF')
+    db.transaction(() => {
+      db.exec(`
+        CREATE TABLE mentees_new (
+          id TEXT PRIMARY KEY,
+          organisation_id TEXT NOT NULL DEFAULT 'ORG-DEFAULT',
+          name TEXT NOT NULL,
+          email TEXT NOT NULL,
+          UNIQUE (organisation_id, email)
+        );
+        INSERT INTO mentees_new (id, organisation_id, name, email)
+        SELECT id, 'ORG-DEFAULT', name, email FROM mentees;
+        DROP TABLE mentees;
+        ALTER TABLE mentees_new RENAME TO mentees;
+      `)
+    })()
+    db.pragma('foreign_keys = ON')
+  }
+
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS questions_org_idx ON questions (organisation_id, created_at);
+    CREATE INDEX IF NOT EXISTS answers_org_idx ON answers (organisation_id, submitted_at);
+    CREATE INDEX IF NOT EXISTS flags_org_idx ON flags (organisation_id, id);
+    CREATE INDEX IF NOT EXISTS assessments_org_idx ON assessments (organisation_id, created_at);
+    CREATE INDEX IF NOT EXISTS audit_logs_org_idx ON audit_logs (organisation_id, created_at);
+  `)
+
   const seed = db.transaction(() => {
     if (db.prepare('SELECT COUNT(*) AS count FROM questions').get().count === 0) {
       const insert = db.prepare(`
@@ -400,6 +451,7 @@ export function questionFromRow(row) {
   const config = parseJson(row.config_json, {})
   return {
     id: row.id,
+    organisationId: row.organisation_id || 'ORG-DEFAULT',
     type: row.type || 'mcq',
     prompt: row.prompt,
     options: parseJson(row.options_json, []),
@@ -420,6 +472,7 @@ export function questionFromRow(row) {
 export function answerFromRow(row) {
   return {
     id: row.id,
+    organisationId: row.organisation_id || 'ORG-DEFAULT',
     attemptId: row.attempt_id || null,
     student: row.student,
     initials: row.initials,
@@ -441,6 +494,7 @@ export function answerFromRow(row) {
 export function flagFromRow(row) {
   return {
     id: row.id,
+    organisationId: row.organisation_id || 'ORG-DEFAULT',
     attemptId: row.attempt_id || null,
     student: row.student,
     initials: row.initials,
@@ -481,7 +535,32 @@ export function auditLogFromRow(row) {
 }
 
 export function menteeFromRow(row) {
-  return { id: row.id, name: row.name, email: row.email }
+  return {
+    id: row.id,
+    organisationId: row.organisation_id || 'ORG-DEFAULT',
+    name: row.name,
+    email: row.email,
+  }
+}
+
+export function slugifyOrgName(name) {
+  return String(name || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 48) || 'workspace'
+}
+
+export function uniqueSlugForOrg(db, name) {
+  const base = slugifyOrgName(name)
+  let candidate = base
+  let suffix = 2
+  while (db.prepare('SELECT 1 FROM organisations WHERE slug = ?').get(candidate)) {
+    candidate = `${base}-${suffix}`
+    suffix++
+  }
+  return candidate
 }
 
 export function assessmentFromRow(db, row) {
@@ -493,6 +572,7 @@ export function assessmentFromRow(db, row) {
   `).all(row.id)
   return {
     id: row.id,
+    organisationId: row.organisation_id || 'ORG-DEFAULT',
     title: row.title,
     description: row.description,
     maxAttempts: row.max_attempts,

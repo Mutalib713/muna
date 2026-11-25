@@ -10,7 +10,7 @@ import DashboardTopbar from './components/DashboardTopbar'
 import FlagReviewModal from './components/FlagReviewModal'
 import QuestionModal from './components/QuestionModal'
 import HelpCenterModal from './components/HelpCenterModal'
-import apiRequest, { cacheCsrfToken, clearCsrfTokenCache, loadDashboardData, loadResourcePage, requestCsrfToken } from './services/adminApi'
+import apiRequest, { cacheCsrfToken, clearCsrfTokenCache, loadDashboardData, loadResourcePage, requestCsrfToken, setActiveOrganisationId } from './services/adminApi'
 import './Dashboard.css'
 
 // Admin workspace dashboard (originally built by Priscilla Etornam Gbordjuer
@@ -18,9 +18,12 @@ import './Dashboard.css'
 // split into per-view files so views can be built independently).
 //
 // Each registered view receives the same `dashboard` context object.
-export default function AdminDashboard() {
+export default function AdminDashboard({ orgSlug = '' }) {
   const [authStatus, setAuthStatus] = useState('checking')
   const [admin, setAdmin] = useState(null)
+  const [organisations, setOrganisations] = useState([])
+  const [activeOrg, setActiveOrg] = useState(null)
+  const [devVerifyToken, setDevVerifyToken] = useState('')
   const [csrfToken, setCsrfToken] = useState('')
   const [loginEmail, setLoginEmail] = useState('')
   const [loginPassword, setLoginPassword] = useState('')
@@ -66,20 +69,51 @@ export default function AdminDashboard() {
         ])
         if (!active) return
         setCsrfToken(token)
-        if (setupRequired) {
+        if (setupRequired && !orgSlug) {
           setAuthStatus('setup-required')
           return
         }
         try {
-          const { user } = await apiRequest('/auth/me')
+          const me = await apiRequest('/auth/me')
+          if (!active) return
+          const user = me.user
+          const orgList = me.organisations || []
+          setAdmin(user)
+          setOrganisations(orgList)
+          if (!user.emailVerified) {
+            setAuthStatus('verification-required')
+            return
+          }
+          const matchedOrg = orgSlug
+            ? orgList.find((org) => org.slug === orgSlug)
+            : (me.organisation || orgList.find((org) => ['Owner', 'Admin', 'Mentor'].includes(org.role)) || orgList[0])
+          if (!matchedOrg) {
+            setApiError('You do not have access to this organisation.')
+            setAuthStatus('unauthenticated')
+            return
+          }
+          if (!['Owner', 'Admin', 'Mentor'].includes(matchedOrg.role)) {
+            if (matchedOrg.menteeId) {
+              window.location.assign(`/#/learner/${encodeURIComponent(matchedOrg.menteeId)}`)
+              return
+            }
+            setApiError('This workspace requires an Owner, Admin, or Mentor role.')
+            setAuthStatus('unauthenticated')
+            return
+          }
+          setActiveOrg(matchedOrg)
+          setActiveOrganisationId(matchedOrg.id)
           const data = await loadDashboardData()
           if (!active) return
-          setAdmin(user)
           applyDashboardData(data)
           setAuthStatus('authenticated')
         } catch (error) {
           if (error.status === 401) {
             setAuthStatus('unauthenticated')
+            return
+          }
+          if (error.payload?.emailVerificationRequired) {
+            setAuthStatus('verification-required')
             return
           }
           throw error
@@ -93,7 +127,7 @@ export default function AdminDashboard() {
     }
     initialize()
     return () => { active = false }
-  }, [])
+  }, [orgSlug])
 
   const pendingAnswers = answers.filter((answer) => answer.status === 'Needs review').length
   const unresolvedFlags = flags.filter((flag) => flag.level !== 'Dismissed').length
@@ -234,6 +268,9 @@ export default function AdminDashboard() {
 
   function clearWorkspaceState() {
     setAdmin(null)
+    setOrganisations([])
+    setActiveOrg(null)
+    setActiveOrganisationId('')
     setQuestions([])
     setAnswers([])
     setFlags([])
@@ -253,8 +290,53 @@ export default function AdminDashboard() {
       requestCsrfToken()
         .then(({ csrfToken: token }) => setCsrfToken(token))
         .catch((refreshError) => setApiError(refreshError.message))
+    } else if (error.payload?.emailVerificationRequired) {
+      setAuthStatus('verification-required')
     }
     setApiError(error.message)
+  }
+
+  async function selectOrganisation(nextOrgId) {
+    setApiError('')
+    const { organisation, organisations: nextOrgs } = await apiRequest('/organisations/switch', {
+      method: 'POST',
+      body: { organisationId: nextOrgId },
+      csrfToken,
+    })
+    setOrganisations(nextOrgs)
+    setActiveOrg(organisation)
+    setActiveOrganisationId(organisation.id)
+    if (orgSlug) {
+      window.history.pushState({}, '', `/o/${encodeURIComponent(organisation.slug)}`)
+    }
+    applyDashboardData(await loadDashboardData())
+  }
+
+  async function createOrganisation(name) {
+    const { organisation } = await apiRequest('/organisations', {
+      method: 'POST',
+      body: { name },
+      csrfToken,
+    })
+    const { organisations: nextOrgs } = await apiRequest('/organisations')
+    setOrganisations(nextOrgs)
+    setActiveOrg(organisation)
+    setActiveOrganisationId(organisation.id)
+    if (orgSlug) {
+      window.history.pushState({}, '', `/o/${encodeURIComponent(organisation.slug)}`)
+    }
+    applyDashboardData(await loadDashboardData())
+  }
+
+  async function handleResendVerification() {
+    setApiError('')
+    try {
+      const data = await apiRequest('/auth/resend-verification', { method: 'POST', csrfToken })
+      if (data.verificationToken) setDevVerifyToken(data.verificationToken)
+      setApiError('Verification email re-issued. Verify your email before opening the workspace.')
+    } catch (error) {
+      setApiError(error.message)
+    }
   }
 
   async function handleLogin(event) {
@@ -263,7 +345,7 @@ export default function AdminDashboard() {
     setLoginError('')
     setApiError('')
     try {
-      const { user, csrfToken: token } = await apiRequest('/auth/login', {
+      const { user, organisation, organisations: orgList = [], csrfToken: token } = await apiRequest('/auth/login', {
         method: 'POST',
         body: { email: loginEmail, password: loginPassword },
         csrfToken,
@@ -271,8 +353,30 @@ export default function AdminDashboard() {
       cacheCsrfToken(token)
       setCsrfToken(token)
       setAdmin(user)
-      applyDashboardData(await loadDashboardData())
+      setOrganisations(orgList)
       setLoginPassword('')
+      if (!user.emailVerified) {
+        setAuthStatus('verification-required')
+        return
+      }
+      const targetOrg = orgSlug
+        ? orgList.find((org) => org.slug === orgSlug)
+        : (organisation || orgList[0])
+      if (!targetOrg) {
+        setLoginError('You do not have access to this organisation.')
+        return
+      }
+      if (!['Owner', 'Admin', 'Mentor'].includes(targetOrg.role)) {
+        if (targetOrg.menteeId) {
+          window.location.assign(`/#/learner/${encodeURIComponent(targetOrg.menteeId)}`)
+          return
+        }
+        setLoginError('Workspace access requires an Owner, Admin, or Mentor role.')
+        return
+      }
+      setActiveOrg(targetOrg)
+      setActiveOrganisationId(targetOrg.id)
+      applyDashboardData(await loadDashboardData())
       setAuthStatus('authenticated')
     } catch (error) {
       setLoginError(error.message)
@@ -287,7 +391,7 @@ export default function AdminDashboard() {
     setSetupError('')
     setApiError('')
     try {
-      const { user, csrfToken: token } = await apiRequest('/auth/setup', {
+      const { user, organisation, organisations: orgList = [], csrfToken: token } = await apiRequest('/auth/setup', {
         method: 'POST',
         body: setupForm,
         csrfToken,
@@ -295,6 +399,9 @@ export default function AdminDashboard() {
       cacheCsrfToken(token)
       setCsrfToken(token)
       setAdmin(user)
+      setOrganisations(orgList)
+      setActiveOrg(organisation)
+      if (organisation?.id) setActiveOrganisationId(organisation.id)
       applyDashboardData(await loadDashboardData())
       setSetupForm({ name: '', email: '', password: '', confirmPassword: '', setupCode: '' })
       setAuthStatus('authenticated')
@@ -601,6 +708,36 @@ export default function AdminDashboard() {
     return <main className="admin-auth-screen"><div className="admin-auth-card admin-auth-loading"><span className="brand-mark">m</span><strong>Loading Muna workspace…</strong></div></main>
   }
 
+  if (authStatus === 'verification-required') {
+    return (
+      <main className="admin-auth-screen">
+        <section className="admin-auth-card">
+          <span className="brand-mark">m</span>
+          <p className="eyebrow">EMAIL VERIFICATION REQUIRED</p>
+          <h1>Verify your email</h1>
+          <p className="auth-subcopy">
+            Confirm <strong>{admin?.email}</strong> before accessing your organisation workspace.
+          </p>
+          {apiError && <p className="inline-message error-message" role="alert">{apiError}</p>}
+          <div style={{ display: 'grid', gap: '10px', marginTop: '14px' }}>
+            <a
+              className="button button-primary"
+              href={devVerifyToken ? `/verify-email?token=${encodeURIComponent(devVerifyToken)}` : '/verify-email'}
+            >
+              Verify email address
+            </a>
+            <button type="button" className="button button-secondary" onClick={handleResendVerification}>
+              Resend verification email
+            </button>
+            <button type="button" className="button button-secondary" onClick={handleLogout}>
+              Sign out
+            </button>
+          </div>
+        </section>
+      </main>
+    )
+  }
+
   if (authStatus !== 'authenticated') {
     return <AdminLoginScreen
       setupRequired={authStatus === 'setup-required'}
@@ -621,9 +758,20 @@ export default function AdminDashboard() {
 
   return (
     <div className="app-shell">
-      <DashboardSidebar views={dashboardViews} activeView={activeView} badges={badges} admin={admin} onNavigate={navigate} onHelp={() => setHelpOpen(true)} />
+      <DashboardSidebar
+        views={dashboardViews}
+        activeView={activeView}
+        badges={badges}
+        admin={admin}
+        organisations={organisations}
+        activeOrganisation={activeOrg}
+        onSelectOrganisation={selectOrganisation}
+        onCreateOrganisation={createOrganisation}
+        onNavigate={navigate}
+        onHelp={() => setHelpOpen(true)}
+      />
       <main className="main-area">
-        <DashboardTopbar activeView={activeView} search={search} admin={admin} onSearch={setSearch} onLogout={handleLogout} />
+        <DashboardTopbar activeView={activeView} search={search} admin={admin} organisation={activeOrg} onSearch={setSearch} onLogout={handleLogout} />
         {apiError && <div className="api-error" role="alert"><span>{apiError}</span><button onClick={() => setApiError('')} aria-label="Dismiss error"><Icon name="close" size={15} /></button></div>}
         <div className="content-area"><ActiveView dashboard={dashboard} /></div>
         <footer className="footer"><span>© 2026 Muna learning</span><span>Admin workspace <i /> All systems operational</span></footer>

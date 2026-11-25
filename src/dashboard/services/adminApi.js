@@ -1,5 +1,17 @@
-async function apiRequest(path, { method = 'GET', body, csrfToken } = {}) {
+let activeOrganisationId = ''
+
+export function setActiveOrganisationId(organisationId) {
+  activeOrganisationId = organisationId || ''
+}
+
+export function getActiveOrganisationId() {
+  return activeOrganisationId
+}
+
+async function apiRequest(path, { method = 'GET', body, csrfToken, organisationId } = {}) {
   const headers = {}
+  const orgId = organisationId !== undefined ? organisationId : activeOrganisationId
+  if (orgId) headers['X-Organisation-Id'] = orgId
   if (body !== undefined) headers['Content-Type'] = 'application/json'
   if (method !== 'GET' && csrfToken) headers['X-CSRF-Token'] = csrfToken
   const response = await fetch(`/api${path}`, {
@@ -12,6 +24,7 @@ async function apiRequest(path, { method = 'GET', body, csrfToken } = {}) {
   if (!response.ok) {
     const error = new Error(payload.error || 'The request could not be completed.')
     error.status = response.status
+    error.payload = payload
     throw error
   }
   return payload

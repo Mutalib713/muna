@@ -96,6 +96,26 @@ export default function LearnerAssessment({ hash }) {
     }
   }, [menteeId, selectedId, syncSelectionState])
 
+  useEffect(() => {
+    if (initialMenteeId) return undefined
+    let active = true
+    async function loadSignedInMentee() {
+      try {
+        const response = await fetch('/api/learner/me')
+        if (!response.ok) return
+        const payload = await response.json()
+        const firstMenteeId = payload.mentees?.[0]?.id
+        if (!active || !firstMenteeId) return
+        setMenteeId(firstMenteeId)
+        await loadAssessments(firstMenteeId)
+      } catch {
+        // Optional session lookup.
+      }
+    }
+    loadSignedInMentee()
+    return () => { active = false }
+  }, [initialMenteeId, loadAssessments])
+
   const persistDraft = useCallback(async (attemptId, nextAnswers) => {
     if (!attemptId) return
     setSaveState('saving')
@@ -328,7 +348,12 @@ export default function LearnerAssessment({ hash }) {
           <button className="button button-primary" type="submit">Load assessments</button>
         </form>
 
-        {error && <p className="inline-message error-message" role="alert">{error}</p>}
+        {error && (
+          <p className="inline-message error-message" role="alert">
+            {error}{' '}
+            {error.toLowerCase().includes('sign-in') && <a href="/login">Log in here</a>}
+          </p>
+        )}
 
         {selected && (
           <div className="learner-assessment">

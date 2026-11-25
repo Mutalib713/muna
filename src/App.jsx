@@ -14,12 +14,12 @@ import './App.css'
 
 const Signup = lazy(() => import('./pages/Signup.jsx'))
 const Login = lazy(() => import('./pages/Login.jsx'))
+const VerifyEmail = lazy(() => import('./pages/VerifyEmail.jsx'))
 const InviteAccept = lazy(() => import('./pages/InviteAccept.jsx'))
 
-// Minimal hash routing: #/dashboard opens the admin workspace, #/learner/<id>
-// opens a learner attempt, everything else shows the landing page. Proper
-// routing (react-router) is a Phase 0 deliverable and should replace this
-// once the app shell exists.
+// Minimal routing: /o/:slug (or #/dashboard) opens an organisation workspace,
+// #/learner opens a learner attempt, and /signup, /login, /verify-email, /invite/:token
+// handle account & invitation flows.
 function useHashRoute() {
   const [hash, setHash] = useState(() => window.location.hash)
   useEffect(() => {
@@ -55,6 +55,19 @@ export default function App() {
         <AuthPage />
       </Suspense>
     )
+  }
+
+  if (path === '/verify-email') {
+    return (
+      <Suspense fallback={<LoadingScreen label="Loading verification page" />}>
+        <VerifyEmail />
+      </Suspense>
+    )
+  }
+
+  if (path.startsWith('/o/')) {
+    const orgSlug = decodeURIComponent(path.slice('/o/'.length).split(/[/?#]/)[0] || '')
+    return <AdminDashboard orgSlug={orgSlug} />
   }
 
   const handleOpenModal = (type) => {

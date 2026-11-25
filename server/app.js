@@ -20,6 +20,7 @@ import {
   menteeFromRow,
   questionFromRow,
   securityEventFromRow,
+  uniqueSlugForOrg,
 } from './db.js'
 import {
   formatPoints,
@@ -58,9 +59,9 @@ function verifyCsrf(req, res, next) {
   next()
 }
 
-function requireAdmin(req, res, next) {
-  if (!req.session?.admin) {
-    res.status(401).json({ error: 'Administrator sign-in is required.' })
+function requireAuth(req, res, next) {
+  if (!req.session?.user && !req.session?.admin) {
+    res.status(401).json({ error: 'Sign-in is required.' })
     return
   }
   next()
@@ -178,13 +179,13 @@ function maskEmail(email) {
   return `${local[0]}${'*'.repeat(Math.min(4, Math.max(1, local.length - 1)))}@${domain}`
 }
 
-function logAudit(db, { actor, action, entityType, entityId, detail = {} }) {
+function logAudit(db, { organisationId = 'ORG-DEFAULT', actor, action, entityType, entityId, detail = {} }) {
   const id = `AUD-${randomUUID().slice(0, 8).toUpperCase()}`
   const createdAt = new Date().toISOString()
   db.prepare(`
-    INSERT INTO audit_logs (id, actor, action, entity_type, entity_id, detail_json, created_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?)
-  `).run(id, actor, action, entityType, entityId, JSON.stringify(detail), createdAt)
+    INSERT INTO audit_logs (id, organisation_id, actor, action, entity_type, entity_id, detail_json, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(id, organisationId, actor, action, entityType, entityId, JSON.stringify(detail), createdAt)
 }
 
 function escapeCsvCell(value) {
@@ -244,19 +245,20 @@ function pagination(req, defaultLimit = 25) {
   return { page, limit, offset: (page - 1) * limit }
 }
 
-function addQuestion(db, input) {
+function addQuestion(db, input, organisationId = 'ORG-DEFAULT') {
   const id = `Q-${randomUUID().slice(0, 8).toUpperCase()}`
   const createdAt = new Date().toISOString()
   const normalized = normalizeQuestionInput(input)
   db.prepare(`
     INSERT INTO questions (
-      id, type, prompt, options_json, correct_answer,
+      id, organisation_id, type, prompt, options_json, correct_answer,
       points, difficulty, tags_json, config_json, rubric_json,
       status, created_at
     )
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Published', ?)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Published', ?)
   `).run(
     id,
+    organisationId,
     normalized.type,
     normalized.prompt,
     JSON.stringify(normalized.options),
@@ -289,11 +291,11 @@ export function createApp({
   distPath,
   orgName = 'Muna Workspace',
   orgSlug = 'muna-workspace',
+  onVerificationEmail,
 }) {
   const app = express()
   const router = express.Router()
-  const workspace = ensureWorkspaceBootstrap(db, { orgName, orgSlug })
-  const organisationId = workspace.organisation.id
+  ensureWorkspaceBootstrap(db, { orgName, orgSlug })
   const authLimiter = rateLimit({
     windowMs: 15 * 60 * 1000,
     limit: 10,
@@ -358,20 +360,73 @@ export function createApp({
     res.json({ setupRequired: !db.prepare('SELECT 1 FROM admin_account WHERE id = 1').get() })
   })
 
-  function signAdminIn(req, res, next, admin) {
+  function getUserOrganisations(userId, userEmail) {
+    const rows = db.prepare(`
+      SELECT o.id, o.slug, o.name, m.role, m.status, m.joined_at AS joinedAt
+      FROM memberships m
+      JOIN organisations o ON o.id = m.organisation_id
+      WHERE m.user_id = ? AND m.status = 'Active'
+      ORDER BY CASE m.role WHEN 'Owner' THEN 0 WHEN 'Admin' THEN 1 WHEN 'Mentor' THEN 2 ELSE 3 END, m.joined_at ASC
+    `).all(userId)
+    return rows.map((row) => {
+      const mentee = userEmail
+        ? db.prepare('SELECT id FROM mentees WHERE organisation_id = ? AND lower(email) = ?').get(row.id, userEmail.toLowerCase())
+        : null
+      return {
+        ...row,
+        menteeId: mentee?.id || null,
+      }
+    })
+  }
+
+  function createVerificationTokenForUser(userId) {
+    const token = randomBytes(24).toString('base64url')
+    const tokenHash = hashInvitationToken(token)
+    const now = new Date()
+    const expiresAt = new Date(now.getTime() + 24 * 60 * 60 * 1000).toISOString()
+    db.prepare('DELETE FROM email_verification_tokens WHERE user_id = ?').run(userId)
+    db.prepare(`
+      INSERT INTO email_verification_tokens (token_hash, user_id, expires_at, created_at)
+      VALUES (?, ?, ?, ?)
+    `).run(tokenHash, userId, expiresAt, now.toISOString())
+    return token
+  }
+
+  function signUserIn(req, res, next, user, preferredOrgId = null, { statusCode = 200, extra = {} } = {}) {
+    const organisations = getUserOrganisations(user.id, user.email)
+    const activeOrg = (preferredOrgId && organisations.find((o) => o.id === preferredOrgId || o.slug === preferredOrgId))
+      || organisations[0]
+      || null
+    const adminRow = db.prepare('SELECT email FROM admin_account WHERE id = 1').get()
+    const isBootstrapAdmin = Boolean(adminRow && adminRow.email === user.email.toLowerCase())
     req.session.regenerate((error) => {
       if (error) {
         next(error)
         return
       }
-      req.session.admin = { email: admin.email, name: admin.name, role: 'admin' }
+      const userSession = {
+        id: user.id,
+        email: user.email,
+        name: user.name,
+        emailVerified: Boolean(user.email_verified_at),
+        role: isBootstrapAdmin ? 'admin' : (activeOrg?.role || 'Mentee'),
+      }
+      req.session.user = userSession
+      req.session.admin = userSession
+      req.session.activeOrganisationId = activeOrg?.id || null
       req.session.csrfToken = randomBytes(32).toString('hex')
       req.session.save((saveError) => {
         if (saveError) {
           next(saveError)
           return
         }
-        res.json({ user: req.session.admin, csrfToken: req.session.csrfToken })
+        res.status(statusCode).json({
+          user: userSession,
+          organisation: activeOrg,
+          organisations,
+          csrfToken: req.session.csrfToken,
+          ...extra,
+        })
       })
     })
   }
@@ -389,7 +444,7 @@ export function createApp({
       const password = typeof req.body?.password === 'string' ? req.body.password : ''
       const confirmPassword = typeof req.body?.confirmPassword === 'string' ? req.body.confirmPassword : ''
       const submittedCode = typeof req.body?.setupCode === 'string' ? req.body.setupCode : ''
-      if (!name || name.length > 120 || !email || email.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      if (!name || name.length > 120 || !isValidEmail(email)) {
         res.status(400).json({ error: 'Enter your name and a valid email address.' })
         return
       }
@@ -421,41 +476,201 @@ export function createApp({
         res.status(403).json({ error: 'An admin account has already been created.' })
         return
       }
-      ensureWorkspaceBootstrap(db, { adminEmail: email, adminName: name, passwordHash, orgName, orgSlug })
-      signAdminIn(req, res, next, { email, name })
+      const bootstrapped = ensureWorkspaceBootstrap(db, { adminEmail: email, adminName: name, passwordHash, orgName, orgSlug })
+      signUserIn(req, res, next, bootstrapped.ownerUser, bootstrapped.organisation.id)
     } catch (error) {
       next(error)
     }
+  })
+
+  router.post('/auth/signup', authLimiter, verifyCsrf, async (req, res, next) => {
+    try {
+      const name = typeof req.body?.name === 'string' ? req.body.name.trim() : ''
+      const email = typeof req.body?.email === 'string' ? req.body.email.trim().toLowerCase() : ''
+      const password = typeof req.body?.password === 'string' ? req.body.password : ''
+      const organisationName = typeof req.body?.organisationName === 'string' ? req.body.organisationName.trim() : ''
+      const requestedSlug = typeof req.body?.slug === 'string' ? req.body.slug.trim().toLowerCase() : ''
+
+      if (!name || name.length > 120 || !isValidEmail(email)) {
+        res.status(400).json({ error: 'Enter your name and a valid email address.' })
+        return
+      }
+      if (password.length < 8) {
+        res.status(400).json({ error: 'Password must be at least 8 characters long.' })
+        return
+      }
+      if (Buffer.byteLength(password, 'utf8') > 72) {
+        res.status(400).json({ error: 'Password must be no more than 72 UTF-8 bytes.' })
+        return
+      }
+      if (!organisationName || organisationName.length > 120) {
+        res.status(400).json({ error: 'Organisation name must contain 1 to 120 characters.' })
+        return
+      }
+      if (requestedSlug && !/^[a-z0-9][a-z0-9-]{1,47}$/.test(requestedSlug)) {
+        res.status(400).json({ error: 'Organisation slug must be 2–48 lowercase letters, numbers, or hyphens.' })
+        return
+      }
+
+      const existingUser = db.prepare('SELECT id FROM users WHERE lower(email) = ?').get(email)
+      if (existingUser) {
+        res.status(409).json({ error: 'An account with this email already exists.' })
+        return
+      }
+
+      const passwordHash = await bcrypt.hash(password, 10)
+      const signupTx = db.transaction(() => {
+        if (db.prepare('SELECT id FROM users WHERE lower(email) = ?').get(email)) {
+          return { statusCode: 409, error: 'An account with this email already exists.' }
+        }
+        const slug = requestedSlug || uniqueSlugForOrg(db, organisationName)
+        if (db.prepare('SELECT 1 FROM organisations WHERE slug = ?').get(slug)) {
+          return { statusCode: 409, error: 'This organisation slug is already taken.' }
+        }
+        const now = new Date().toISOString()
+        const userId = `U-${randomUUID().slice(0, 8).toUpperCase()}`
+        const orgId = `ORG-${randomUUID().slice(0, 8).toUpperCase()}`
+        const membershipId = `MEM-${randomUUID().slice(0, 8).toUpperCase()}`
+
+        db.prepare(`
+          INSERT INTO users (id, email, name, password_hash, email_verified_at, created_at)
+          VALUES (?, ?, ?, ?, NULL, ?)
+        `).run(userId, email, name, passwordHash, now)
+        db.prepare(`
+          INSERT INTO organisations (id, slug, name, created_at)
+          VALUES (?, ?, ?, ?)
+        `).run(orgId, slug, organisationName, now)
+        db.prepare(`
+          INSERT INTO memberships (id, user_id, organisation_id, role, status, joined_at)
+          VALUES (?, ?, ?, 'Owner', 'Active', ?)
+        `).run(membershipId, userId, orgId, now)
+
+        const verificationToken = createVerificationTokenForUser(userId)
+        const user = db.prepare('SELECT * FROM users WHERE id = ?').get(userId)
+        return { user, orgId, verificationToken }
+      })
+
+      const outcome = signupTx.immediate()
+      if (outcome.error) {
+        res.status(outcome.statusCode).json({ error: outcome.error })
+        return
+      }
+      onVerificationEmail?.({ email, name, token: outcome.verificationToken })
+      signUserIn(req, res, next, outcome.user, outcome.orgId, {
+        statusCode: 201,
+        extra: production
+          ? { emailVerificationRequired: true }
+          : { emailVerificationRequired: true, verificationToken: outcome.verificationToken },
+      })
+    } catch (error) {
+      next(error)
+    }
+  })
+
+  router.post('/auth/verify-email', authLimiter, verifyCsrf, (req, res) => {
+    const token = typeof req.body?.token === 'string' ? req.body.token.trim() : ''
+    if (!token || token.length > 200) {
+      res.status(400).json({ error: 'A verification token is required.' })
+      return
+    }
+    const tokenHash = hashInvitationToken(token)
+    const row = db.prepare('SELECT * FROM email_verification_tokens WHERE token_hash = ?').get(tokenHash)
+    if (!row) {
+      res.status(400).json({ error: 'Invalid or already used verification token.' })
+      return
+    }
+    if (Date.parse(row.expires_at) <= Date.now()) {
+      db.prepare('DELETE FROM email_verification_tokens WHERE token_hash = ?').run(tokenHash)
+      res.status(410).json({ error: 'Verification token has expired. Request a new verification email.' })
+      return
+    }
+    const now = new Date().toISOString()
+    db.transaction(() => {
+      db.prepare('UPDATE users SET email_verified_at = ? WHERE id = ?').run(now, row.user_id)
+      db.prepare('DELETE FROM email_verification_tokens WHERE user_id = ?').run(row.user_id)
+    })()
+    if (req.session?.user?.id === row.user_id) {
+      req.session.user.emailVerified = true
+    }
+    res.json({ ok: true, emailVerified: true })
+  })
+
+  router.post('/auth/resend-verification', requireAuth, authLimiter, verifyCsrf, (req, res) => {
+    const userId = req.session.user?.id
+    const user = userId ? db.prepare('SELECT * FROM users WHERE id = ?').get(userId) : null
+    if (!user) {
+      res.status(404).json({ error: 'User account not found.' })
+      return
+    }
+    if (user.email_verified_at) {
+      res.json({ ok: true, alreadyVerified: true })
+      return
+    }
+    const verificationToken = createVerificationTokenForUser(user.id)
+    onVerificationEmail?.({ email: user.email, name: user.name, token: verificationToken })
+    res.json(production ? { ok: true } : { ok: true, verificationToken })
   })
 
   router.post('/auth/login', authLimiter, verifyCsrf, async (req, res, next) => {
     try {
       const email = typeof req.body?.email === 'string' ? req.body.email.trim().toLowerCase() : ''
       const password = typeof req.body?.password === 'string' ? req.body.password : ''
-      const admin = db.prepare('SELECT name, email, password_hash FROM admin_account WHERE id = 1').get()
-      const passwordMatches = admin && await bcrypt.compare(password, admin.password_hash)
-      if (!admin || !email || email !== admin.email || !passwordMatches) {
+      if (!email || !password) {
         res.status(401).json({ error: 'Invalid email or password.' })
         return
       }
-      signAdminIn(req, res, next, admin)
+
+      let user = db.prepare('SELECT * FROM users WHERE lower(email) = ?').get(email)
+      const admin = db.prepare('SELECT name, email, password_hash FROM admin_account WHERE id = 1').get()
+
+      if (user && user.password_hash) {
+        const matches = await bcrypt.compare(password, user.password_hash)
+        if (!matches) {
+          res.status(401).json({ error: 'Invalid email or password.' })
+          return
+        }
+      } else if (admin && email === admin.email && await bcrypt.compare(password, admin.password_hash)) {
+        const bootstrapped = ensureWorkspaceBootstrap(db, {
+          adminEmail: admin.email,
+          adminName: admin.name,
+          passwordHash: admin.password_hash,
+          orgName,
+          orgSlug,
+        })
+        user = bootstrapped.ownerUser
+      } else {
+        res.status(401).json({ error: 'Invalid email or password.' })
+        return
+      }
+
+      signUserIn(req, res, next, user)
     } catch (error) {
       next(error)
     }
   })
 
-  router.get('/auth/me', requireAdmin, (req, res) => {
+  router.get('/auth/me', requireAuth, (req, res) => {
+    const userId = req.session.user?.id
+    const userRow = userId ? db.prepare('SELECT * FROM users WHERE id = ?').get(userId) : null
+    if (!userRow) {
+      res.status(401).json({ error: 'Sign-in is required.' })
+      return
+    }
+    const organisations = getUserOrganisations(userRow.id, userRow.email)
+    const activeOrg = organisations.find((o) => o.id === req.session.activeOrganisationId) || organisations[0] || null
+    req.session.user = {
+      ...req.session.user,
+      emailVerified: Boolean(userRow.email_verified_at),
+    }
+    req.session.activeOrganisationId = activeOrg?.id || null
     res.json({
-      user: req.session.admin,
-      organisation: {
-        id: workspace.organisation.id,
-        slug: workspace.organisation.slug,
-        name: workspace.organisation.name,
-      },
+      user: req.session.user,
+      organisation: activeOrg,
+      organisations,
     })
   })
 
-  router.post('/auth/logout', requireAdmin, verifyCsrf, (req, res, next) => {
+  router.post('/auth/logout', requireAuth, verifyCsrf, (req, res, next) => {
     req.session.destroy((error) => {
       if (error) {
         next(error)
@@ -588,7 +803,7 @@ export function createApp({
           if (existingMembership.status === 'Suspended') {
             return { errorStatus: 403, error: 'Your membership in this organisation is currently suspended.' }
           }
-          const linkedMentee = db.prepare('SELECT id FROM mentees WHERE lower(email) = ?').get(email)
+          const linkedMentee = db.prepare('SELECT id FROM mentees WHERE organisation_id = ? AND lower(email) = ?').get(freshInvite.organisation_id, email)
           return {
             alreadyMember: true,
             member: memberFromRow(existingMembership),
@@ -617,12 +832,17 @@ export function createApp({
 
         let menteeId = null
         if (freshInvite.role === 'Mentee') {
-          const existingMentee = db.prepare('SELECT id FROM mentees WHERE lower(email) = ?').get(email)
+          const existingMentee = db.prepare('SELECT id FROM mentees WHERE organisation_id = ? AND lower(email) = ?').get(freshInvite.organisation_id, email)
           if (existingMentee) {
             menteeId = existingMentee.id
           } else {
             menteeId = `M-${randomUUID().slice(0, 8).toUpperCase()}`
-            db.prepare('INSERT INTO mentees (id, name, email) VALUES (?, ?, ?)').run(menteeId, user.name, email)
+            db.prepare('INSERT INTO mentees (id, organisation_id, name, email) VALUES (?, ?, ?, ?)').run(
+              menteeId,
+              freshInvite.organisation_id,
+              user.name,
+              email,
+            )
           }
         }
 
@@ -656,7 +876,57 @@ export function createApp({
     }
   })
 
-  router.use(requireAdmin)
+  function requireVerifiedEmail(req, res, next) {
+    if (!req.session?.user?.id) {
+      res.status(401).json({ error: 'Sign-in is required.' })
+      return
+    }
+    const row = db.prepare('SELECT email_verified_at FROM users WHERE id = ?').get(req.session.user.id)
+    if (!row || !row.email_verified_at) {
+      res.status(403).json({
+        error: 'Verify your email address before accessing your workspace.',
+        emailVerificationRequired: true,
+      })
+      return
+    }
+    req.session.user.emailVerified = true
+    next()
+  }
+
+  function checkLearnerAccess(req, mentee) {
+    const sessionUser = req.session?.user
+    if (!sessionUser?.id) {
+      return { ok: false, statusCode: 401, error: 'Sign-in is required.' }
+    }
+    const orgId = mentee.organisation_id || 'ORG-DEFAULT'
+    const membership = db.prepare(`
+      SELECT role, status FROM memberships
+      WHERE user_id = ? AND organisation_id = ?
+    `).get(sessionUser.id, orgId)
+    if (!membership || membership.status !== 'Active') {
+      return { ok: false, statusCode: 403, error: 'You do not have access to this organisation.' }
+    }
+    if (['Owner', 'Admin', 'Mentor'].includes(membership.role)) {
+      return { ok: true }
+    }
+    if (membership.role === 'Mentee' && sessionUser.email?.toLowerCase() === mentee.email.toLowerCase()) {
+      return { ok: true }
+    }
+    return { ok: false, statusCode: 403, error: 'You can only view your own learner assessments.' }
+  }
+
+  router.get('/learner/me', requireAuth, (req, res) => {
+    const email = req.session.user.email.toLowerCase()
+    const rows = db.prepare(`
+      SELECT m.id, m.name, m.email, m.organisation_id AS organisationId, o.name AS organisationName, o.slug AS organisationSlug
+      FROM mentees m
+      JOIN organisations o ON o.id = m.organisation_id
+      JOIN memberships mem ON mem.organisation_id = m.organisation_id AND mem.user_id = ?
+      WHERE lower(m.email) = ? AND mem.status = 'Active'
+      ORDER BY o.name ASC
+    `).all(req.session.user.id, email)
+    res.json({ user: req.session.user, mentees: rows })
+  })
 
   function shuffleList(items) {
     const copy = [...items]
@@ -818,12 +1088,13 @@ export function createApp({
 
     db.prepare(`
       INSERT INTO answers (
-        id, attempt_id, student, initials, assessment, answer, score,
+        id, organisation_id, attempt_id, student, initials, assessment, answer, score,
         earned_points, max_points, items_json, submitted_at, status
       )
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Needs review')
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Needs review')
     `).run(
       answerId,
+      assessment.organisation_id || 'ORG-DEFAULT',
       attemptId,
       mentee.name,
       initialsFor(mentee.name),
@@ -872,18 +1143,23 @@ export function createApp({
     return tx.immediate()
   }
 
-  router.get('/learner/assessments/:menteeId', (req, res) => {
+  router.get('/learner/assessments/:menteeId', requireAuth, (req, res) => {
     const mentee = db.prepare('SELECT * FROM mentees WHERE id = ?').get(req.params.menteeId)
     if (!mentee) {
       res.status(404).json({ error: 'Mentee not found.' })
       return
     }
+    const access = checkLearnerAccess(req, mentee)
+    if (!access.ok) {
+      res.status(access.statusCode).json({ error: access.error })
+      return
+    }
     const rows = db.prepare(`
       SELECT a.* FROM assessments a
       JOIN assessment_assignments aa ON aa.assessment_id = a.id
-      WHERE aa.mentee_id = ? AND a.status = 'Published'
+      WHERE aa.mentee_id = ? AND a.organisation_id = ? AND a.status = 'Published'
       ORDER BY a.created_at DESC
-    `).all(req.params.menteeId)
+    `).all(req.params.menteeId, mentee.organisation_id || 'ORG-DEFAULT')
     res.json({
       assessments: rows.map((row) => {
         const inProgress = db.prepare(`
@@ -959,7 +1235,7 @@ export function createApp({
     })
   })
 
-  router.post('/learner/assessments/:id/start', (req, res) => {
+  router.post('/learner/assessments/:id/start', requireAuth, (req, res) => {
     const menteeId = typeof req.body?.menteeId === 'string' ? req.body.menteeId : ''
     const startTx = db.transaction(() => {
       const assessment = db.prepare('SELECT * FROM assessments WHERE id = ?').get(req.params.id)
@@ -969,7 +1245,11 @@ export function createApp({
         SELECT 1 FROM assessment_assignments WHERE assessment_id = ? AND mentee_id = ?
       `).get(req.params.id, menteeId)
       const mentee = db.prepare('SELECT * FROM mentees WHERE id = ?').get(menteeId)
-      if (!assignment || !mentee) return { statusCode: 403, error: 'This assessment is not assigned to the mentee.' }
+      if (!assignment || !mentee || (mentee.organisation_id || 'ORG-DEFAULT') !== (assessment.organisation_id || 'ORG-DEFAULT')) {
+        return { statusCode: 403, error: 'This assessment is not assigned to the mentee.' }
+      }
+      const access = checkLearnerAccess(req, mentee)
+      if (!access.ok) return { statusCode: access.statusCode, error: access.error }
 
       const availability = getAvailabilityState(assessment)
       if (availability === 'upcoming') {
@@ -1102,7 +1382,7 @@ export function createApp({
     })
   })
 
-  router.put('/learner/attempts/:attemptId/responses', (req, res) => {
+  router.put('/learner/attempts/:attemptId/responses', requireAuth, (req, res) => {
     const menteeId = typeof req.body?.menteeId === 'string' ? req.body.menteeId : ''
     const answers = req.body?.answers
     if (!answers || typeof answers !== 'object' || Array.isArray(answers)) {
@@ -1118,6 +1398,11 @@ export function createApp({
     const mentee = db.prepare('SELECT * FROM mentees WHERE id = ?').get(menteeId)
     if (!assessment || !mentee) {
       res.status(404).json({ error: 'Assessment not found.' })
+      return
+    }
+    const access = checkLearnerAccess(req, mentee)
+    if (!access.ok) {
+      res.status(access.statusCode).json({ error: access.error })
       return
     }
     const expired = expireOverdueAttemptIfNeeded(assessment, mentee, attempt)
@@ -1146,7 +1431,7 @@ export function createApp({
     res.json({ ok: true, lastSavedAt: now })
   })
 
-  router.post('/learner/attempts/:attemptId/security-events', (req, res) => {
+  router.post('/learner/attempts/:attemptId/security-events', requireAuth, (req, res) => {
     const menteeId = typeof req.body?.menteeId === 'string' ? req.body.menteeId : ''
     const eventType = req.body?.eventType
     const detail = typeof req.body?.detail === 'string' ? req.body.detail.trim().slice(0, 500) : ''
@@ -1169,6 +1454,10 @@ export function createApp({
       const mentee = db.prepare('SELECT * FROM mentees WHERE id = ?').get(menteeId)
       if (!assessment || !mentee) {
         return { statusCode: 404, error: 'Assessment not found.' }
+      }
+      const access = checkLearnerAccess(req, mentee)
+      if (!access.ok) {
+        return { statusCode: access.statusCode, error: access.error }
       }
       if (attempt.status !== 'in_progress') {
         return {
@@ -1206,9 +1495,19 @@ export function createApp({
         } else {
           const flagId = `F-${randomUUID().slice(0, 8).toUpperCase()}`
           db.prepare(`
-            INSERT INTO flags (id, attempt_id, student, initials, assessment, signal, detail, level, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, 'Needs review', ?)
-          `).run(flagId, attempt.id, mentee.name, initialsFor(mentee.name), assessment.title, signalTitle, signalDetail, now)
+            INSERT INTO flags (id, organisation_id, attempt_id, student, initials, assessment, signal, detail, level, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'Needs review', ?)
+          `).run(
+            flagId,
+            assessment.organisation_id || 'ORG-DEFAULT',
+            attempt.id,
+            mentee.name,
+            initialsFor(mentee.name),
+            assessment.title,
+            signalTitle,
+            signalDetail,
+            now,
+          )
         }
       }
 
@@ -1270,7 +1569,7 @@ export function createApp({
     res.status(outcome.statusCode).json(outcome)
   })
 
-  router.post('/learner/assessments/:id/attempts', (req, res) => {
+  router.post('/learner/assessments/:id/attempts', requireAuth, (req, res) => {
     const assessment = db.prepare('SELECT * FROM assessments WHERE id = ?').get(req.params.id)
     if (!assessment) {
       res.status(404).json({ error: 'Assessment not found.' })
@@ -1286,8 +1585,13 @@ export function createApp({
       WHERE assessment_id = ? AND mentee_id = ?
     `).get(req.params.id, menteeId)
     const mentee = db.prepare('SELECT * FROM mentees WHERE id = ?').get(menteeId)
-    if (!assignment || !mentee) {
+    if (!assignment || !mentee || (mentee.organisation_id || 'ORG-DEFAULT') !== (assessment.organisation_id || 'ORG-DEFAULT')) {
       res.status(403).json({ error: 'This assessment is not assigned to the mentee.' })
+      return
+    }
+    const access = checkLearnerAccess(req, mentee)
+    if (!access.ok) {
+      res.status(access.statusCode).json({ error: access.error })
       return
     }
     const submittedAnswers = req.body?.answers
@@ -1386,13 +1690,295 @@ export function createApp({
     })
   })
 
-  router.use(requireAdmin)
+  function requireOrgAdmin(req, res, next) {
+    if (!['Owner', 'Admin'].includes(req.org?.role)) {
+      res.status(403).json({ error: 'Only workspace owners or admins can manage members and invitations.' })
+      return
+    }
+    next()
+  }
+
+  function resolveOrgContext(req, res, next) {
+    const requestedOrgKey = typeof req.params?.orgId === 'string' && req.params.orgId
+      ? req.params.orgId.trim()
+      : (typeof req.get('x-organisation-id') === 'string' && req.get('x-organisation-id').trim())
+        ? req.get('x-organisation-id').trim()
+        : req.session?.activeOrganisationId
+    const row = requestedOrgKey
+      ? db.prepare(`
+          SELECT o.id, o.slug, o.name, m.role, m.status
+          FROM memberships m
+          JOIN organisations o ON o.id = m.organisation_id
+          WHERE m.user_id = ? AND (o.id = ? OR o.slug = ?)
+        `).get(req.session.user.id, requestedOrgKey, requestedOrgKey)
+      : db.prepare(`
+          SELECT o.id, o.slug, o.name, m.role, m.status
+          FROM memberships m
+          JOIN organisations o ON o.id = m.organisation_id
+          WHERE m.user_id = ? AND m.status = 'Active'
+          ORDER BY CASE m.role WHEN 'Owner' THEN 0 WHEN 'Admin' THEN 1 WHEN 'Mentor' THEN 2 ELSE 3 END, m.joined_at ASC
+          LIMIT 1
+        `).get(req.session.user.id)
+
+    if (!row) {
+      res.status(403).json({ error: 'You do not have access to this organisation.' })
+      return
+    }
+    if (row.status !== 'Active') {
+      res.status(403).json({ error: 'Your membership in this organisation is suspended.' })
+      return
+    }
+    if (!['Owner', 'Admin', 'Mentor'].includes(row.role)) {
+      res.status(403).json({ error: 'Workspace access requires an Owner, Admin, or Mentor role.' })
+      return
+    }
+    req.org = { id: row.id, slug: row.slug, name: row.name, role: row.role }
+    req.session.activeOrganisationId = row.id
+    next()
+  }
+
+  router.get('/organisations', requireAuth, (req, res) => {
+    const organisations = getUserOrganisations(req.session.user.id, req.session.user.email)
+    res.json({
+      organisations,
+      activeOrganisationId: req.session.activeOrganisationId || organisations[0]?.id || null,
+    })
+  })
+
+  router.post('/organisations', requireAuth, requireVerifiedEmail, verifyCsrf, (req, res) => {
+    const name = typeof req.body?.name === 'string' ? req.body.name.trim() : ''
+    if (name.length < 2 || name.length > 120) {
+      res.status(400).json({ error: 'Organisation name must be between 2 and 120 characters.' })
+      return
+    }
+    const createdAt = new Date().toISOString()
+    const createdOrg = db.transaction(() => {
+      const id = `ORG-${randomUUID().slice(0, 8).toUpperCase()}`
+      const slug = uniqueSlugForOrg(db, name)
+      db.prepare('INSERT INTO organisations (id, slug, name, created_at) VALUES (?, ?, ?, ?)').run(id, slug, name, createdAt)
+      db.prepare(`
+        INSERT INTO memberships (id, user_id, organisation_id, role, status, joined_at)
+        VALUES (?, ?, ?, 'Owner', 'Active', ?)
+      `).run(`MEM-${randomUUID().slice(0, 8).toUpperCase()}`, req.session.user.id, id, createdAt)
+      return { id, slug, name, role: 'Owner', status: 'Active', joinedAt: createdAt }
+    })()
+    req.session.activeOrganisationId = createdOrg.id
+    res.status(201).json({ organisation: createdOrg })
+  })
+
+  router.post('/organisations/switch', requireAuth, verifyCsrf, (req, res) => {
+    const target = typeof req.body?.organisationId === 'string' && req.body.organisationId.trim()
+      ? req.body.organisationId.trim()
+      : (typeof req.body?.slug === 'string' ? req.body.slug.trim() : '')
+    const organisations = getUserOrganisations(req.session.user.id, req.session.user.email)
+    const matched = organisations.find((org) => org.id === target || org.slug === target)
+    if (!matched) {
+      res.status(403).json({ error: 'You do not have access to this organisation.' })
+      return
+    }
+    req.session.activeOrganisationId = matched.id
+    res.json({ organisation: matched, organisations })
+  })
+
+  function handleListMembers(req, res) {
+    const orgId = req.org.id
+    const { page, limit, offset } = pagination(req, 100)
+    const search = typeof req.query.search === 'string' ? req.query.search.trim().toLowerCase() : ''
+    const role = typeof req.query.role === 'string' ? req.query.role : ''
+    const clauses = ['m.organisation_id = ?']
+    const params = [orgId]
+    if (search) {
+      clauses.push('(lower(u.name) LIKE ? OR lower(u.email) LIKE ?)')
+      params.push(`%${search}%`, `%${search}%`)
+    }
+    if (['Owner', 'Admin', 'Mentor', 'Mentee'].includes(role)) {
+      clauses.push('m.role = ?')
+      params.push(role)
+    }
+    const where = `WHERE ${clauses.join(' AND ')}`
+    const total = db.prepare(`
+      SELECT COUNT(*) AS count
+      FROM memberships m
+      JOIN users u ON u.id = m.user_id
+      ${where}
+    `).get(...params).count
+    const rows = db.prepare(`
+      SELECT m.*, u.name, u.email
+      FROM memberships m
+      JOIN users u ON u.id = m.user_id
+      ${where}
+      ORDER BY CASE m.role WHEN 'Owner' THEN 0 WHEN 'Admin' THEN 1 WHEN 'Mentor' THEN 2 ELSE 3 END, m.joined_at DESC
+      LIMIT ? OFFSET ?
+    `).all(...params, limit, offset)
+    res.json({
+      organisation: {
+        id: req.org.id,
+        slug: req.org.slug,
+        name: req.org.name,
+      },
+      members: rows.map(memberFromRow),
+      pagination: { page, limit, total, pages: Math.max(1, Math.ceil(total / limit)) },
+    })
+  }
+
+  function handleUpdateMember(req, res) {
+    const orgId = req.org.id
+    const existing = db.prepare(`
+      SELECT m.*, u.name, u.email
+      FROM memberships m
+      JOIN users u ON u.id = m.user_id
+      WHERE (m.id = ? OR m.user_id = ?) AND m.organisation_id = ?
+    `).get(req.params.id, req.params.id, orgId)
+    if (!existing) {
+      res.status(404).json({ error: 'Member not found.' })
+      return
+    }
+    if (existing.role === 'Owner') {
+      res.status(403).json({ error: 'The workspace owner cannot be modified.' })
+      return
+    }
+    const nextRole = req.body?.role !== undefined ? req.body.role : existing.role
+    const nextStatus = req.body?.status !== undefined ? req.body.status : existing.status
+    if (!INVITABLE_ROLES.includes(nextRole)) {
+      res.status(400).json({ error: 'Role must be Admin, Mentor, or Mentee.' })
+      return
+    }
+    if (!MEMBER_STATUSES.includes(nextStatus)) {
+      res.status(400).json({ error: 'Status must be Active or Suspended.' })
+      return
+    }
+    const updateTx = db.transaction(() => {
+      db.prepare(`
+        UPDATE memberships SET role = ?, status = ?
+        WHERE id = ? AND organisation_id = ?
+      `).run(nextRole, nextStatus, existing.id, orgId)
+      if (nextRole === 'Mentee') {
+        const existingMentee = db.prepare('SELECT id FROM mentees WHERE organisation_id = ? AND lower(email) = ?').get(orgId, existing.email.toLowerCase())
+        if (!existingMentee) {
+          db.prepare('INSERT INTO mentees (id, organisation_id, name, email) VALUES (?, ?, ?, ?)').run(
+            `M-${randomUUID().slice(0, 8).toUpperCase()}`,
+            orgId,
+            existing.name,
+            existing.email.toLowerCase(),
+          )
+        }
+      }
+    })
+    updateTx()
+    const row = db.prepare(`
+      SELECT m.*, u.name, u.email
+      FROM memberships m
+      JOIN users u ON u.id = m.user_id
+      WHERE m.id = ? AND m.organisation_id = ?
+    `).get(existing.id, orgId)
+    res.json({ member: memberFromRow(row) })
+  }
+
+  function handleDeleteMember(req, res) {
+    const orgId = req.org.id
+    const existing = db.prepare(`
+      SELECT * FROM memberships WHERE (id = ? OR user_id = ?) AND organisation_id = ?
+    `).get(req.params.id, req.params.id, orgId)
+    if (!existing) {
+      res.status(404).json({ error: 'Member not found.' })
+      return
+    }
+    if (existing.role === 'Owner') {
+      res.status(403).json({ error: 'The workspace owner cannot be removed.' })
+      return
+    }
+    db.prepare('DELETE FROM memberships WHERE id = ? AND organisation_id = ?').run(existing.id, orgId)
+    res.json({ ok: true })
+  }
+
+  function handleListInvitations(req, res) {
+    const orgId = req.org.id
+    const { page, limit, offset } = pagination(req, 100)
+    const search = typeof req.query.search === 'string' ? req.query.search.trim().toLowerCase() : ''
+    const clauses = ['organisation_id = ?']
+    const params = [orgId]
+    if (search) {
+      clauses.push('(lower(id) LIKE ? OR lower(coalesce(email, \'\')) LIKE ?)')
+      params.push(`%${search}%`, `%${search}%`)
+    }
+    const where = `WHERE ${clauses.join(' AND ')}`
+    const total = db.prepare(`SELECT COUNT(*) AS count FROM invitations ${where}`).get(...params).count
+    const rows = db.prepare(`
+      SELECT * FROM invitations ${where}
+      ORDER BY created_at DESC, id DESC
+      LIMIT ? OFFSET ?
+    `).all(...params, limit, offset)
+    res.json({
+      invitations: rows.map(invitationFromRow),
+      pagination: { page, limit, total, pages: Math.max(1, Math.ceil(total / limit)) },
+    })
+  }
+
+  function handleCreateInvitation(req, res) {
+    const orgId = req.org.id
+    const validationError = validateInvitationCreate(req.body)
+    if (validationError) {
+      res.status(400).json({ error: validationError })
+      return
+    }
+    const type = req.body.type
+    const role = req.body.role
+    const days = Number(req.body.days ?? 7)
+    const maxUses = type === 'email' ? 1 : Number(req.body.maxUses ?? 10)
+    const email = type === 'email' ? req.body.email.trim().toLowerCase() : null
+    const now = new Date()
+    const createdAt = now.toISOString()
+    const expiresAt = new Date(now.getTime() + days * 86400000).toISOString()
+    const id = `INV-${randomUUID().slice(0, 8).toUpperCase()}`
+    const token = `MUNA-${randomBytes(16).toString('base64url')}`
+    const tokenHash = hashInvitationToken(token)
+
+    db.prepare(`
+      INSERT INTO invitations (id, organisation_id, type, email, role, token_hash, created_by, created_at, expires_at, max_uses, uses, revoked)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0)
+    `).run(id, orgId, type, email, role, tokenHash, req.session.user.name, createdAt, expiresAt, maxUses)
+
+    const row = db.prepare('SELECT * FROM invitations WHERE id = ?').get(id)
+    res.status(201).json({
+      invitation: {
+        ...invitationFromRow(row),
+        token,
+        acceptPath: `/invite/${token}`,
+      },
+    })
+  }
+
+  function handleDeleteInvitation(req, res) {
+    const orgId = req.org.id
+    const existing = db.prepare('SELECT * FROM invitations WHERE id = ? AND organisation_id = ?').get(req.params.id, orgId)
+    if (!existing) {
+      res.status(404).json({ error: 'Invitation not found.' })
+      return
+    }
+    db.prepare('UPDATE invitations SET revoked = 1 WHERE id = ? AND organisation_id = ?').run(req.params.id, orgId)
+    const row = db.prepare('SELECT * FROM invitations WHERE id = ? AND organisation_id = ?').get(req.params.id, orgId)
+    res.json({ ok: true, invitation: invitationFromRow(row) })
+  }
+
+  router.get('/organisations/:orgId/members', requireAuth, requireVerifiedEmail, resolveOrgContext, handleListMembers)
+  router.patch('/organisations/:orgId/members/:id', requireAuth, requireVerifiedEmail, resolveOrgContext, requireOrgAdmin, verifyCsrf, handleUpdateMember)
+  router.delete('/organisations/:orgId/members/:id', requireAuth, requireVerifiedEmail, resolveOrgContext, requireOrgAdmin, verifyCsrf, handleDeleteMember)
+  router.get('/organisations/:orgId/invitations', requireAuth, requireVerifiedEmail, resolveOrgContext, handleListInvitations)
+  router.post('/organisations/:orgId/invitations', requireAuth, requireVerifiedEmail, resolveOrgContext, requireOrgAdmin, verifyCsrf, handleCreateInvitation)
+  router.delete('/organisations/:orgId/invitations/:id', requireAuth, requireVerifiedEmail, resolveOrgContext, requireOrgAdmin, verifyCsrf, handleDeleteInvitation)
+
+  router.use(requireAuth, requireVerifiedEmail, resolveOrgContext)
 
   router.get('/questions', (req, res) => {
     const { page, limit, offset } = pagination(req)
     const search = typeof req.query.search === 'string' ? req.query.search.trim().toLowerCase() : ''
-    const where = search ? 'WHERE lower(prompt) LIKE ? OR lower(id) LIKE ?' : ''
-    const params = search ? [`%${search}%`, `%${search}%`] : []
+    const clauses = ['organisation_id = ?']
+    const params = [req.org.id]
+    if (search) {
+      clauses.push('(lower(prompt) LIKE ? OR lower(id) LIKE ?)')
+      params.push(`%${search}%`, `%${search}%`)
+    }
+    const where = `WHERE ${clauses.join(' AND ')}`
     const total = db.prepare(`SELECT COUNT(*) AS count FROM questions ${where}`).get(...params).count
     const rows = db.prepare(`SELECT * FROM questions ${where} ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`).all(...params, limit, offset)
     res.json({ questions: rows.map(questionFromRow), pagination: { page, limit, total, pages: Math.max(1, Math.ceil(total / limit)) } })
@@ -1404,7 +1990,7 @@ export function createApp({
       res.status(400).json({ error: validationError })
       return
     }
-    res.status(201).json({ question: addQuestion(db, req.body) })
+    res.status(201).json({ question: addQuestion(db, req.body, req.org.id) })
   })
 
   router.post('/questions/import', verifyCsrf, (req, res) => {
@@ -1418,7 +2004,7 @@ export function createApp({
       res.status(400).json({ error: `Question ${invalidIndex + 1}: ${validateQuestion(questions[invalidIndex])}` })
       return
     }
-    const insertQuestions = db.transaction((items) => items.map((item) => addQuestion(db, item)))
+    const insertQuestions = db.transaction((items) => items.map((item) => addQuestion(db, item, req.org.id)))
     const imported = insertQuestions(questions)
     res.status(201).json({ questions: imported })
   })
@@ -1429,7 +2015,7 @@ export function createApp({
       res.status(400).json({ error: validationError })
       return
     }
-    const existing = db.prepare('SELECT * FROM questions WHERE id = ?').get(req.params.id)
+    const existing = db.prepare('SELECT * FROM questions WHERE id = ? AND organisation_id = ?').get(req.params.id, req.org.id)
     if (!existing) {
       res.status(404).json({ error: 'Question not found.' })
       return
@@ -1440,7 +2026,7 @@ export function createApp({
       SET type = ?, prompt = ?, options_json = ?, correct_answer = ?,
           points = ?, difficulty = ?, tags_json = ?, config_json = ?, rubric_json = ?,
           status = 'Published'
-      WHERE id = ?
+      WHERE id = ? AND organisation_id = ?
     `).run(
       normalized.type,
       normalized.prompt,
@@ -1452,30 +2038,37 @@ export function createApp({
       JSON.stringify(normalized.config),
       JSON.stringify(normalized.rubric),
       req.params.id,
+      req.org.id,
     )
-    const row = db.prepare('SELECT * FROM questions WHERE id = ?').get(req.params.id)
+    const row = db.prepare('SELECT * FROM questions WHERE id = ? AND organisation_id = ?').get(req.params.id, req.org.id)
     res.json({ question: questionFromRow(row) })
   })
 
   router.delete('/questions/:id', verifyCsrf, (req, res) => {
+    const existing = db.prepare('SELECT id FROM questions WHERE id = ? AND organisation_id = ?').get(req.params.id, req.org.id)
+    if (!existing) {
+      res.status(404).json({ error: 'Question not found.' })
+      return
+    }
     const inUse = db.prepare('SELECT COUNT(*) AS count FROM assessment_questions WHERE question_id = ?').get(req.params.id).count
     if (inUse) {
       res.status(409).json({ error: 'This question is used by one or more assessments and cannot be deleted.' })
       return
     }
-    const deleted = db.prepare('DELETE FROM questions WHERE id = ?').run(req.params.id)
-    if (!deleted.changes) {
-      res.status(404).json({ error: 'Question not found.' })
-      return
-    }
+    db.prepare('DELETE FROM questions WHERE id = ? AND organisation_id = ?').run(req.params.id, req.org.id)
     res.json({ ok: true })
   })
 
   router.get('/mentees', (req, res) => {
     const { page, limit, offset } = pagination(req)
     const search = typeof req.query.search === 'string' ? req.query.search.trim().toLowerCase() : ''
-    const where = search ? 'WHERE lower(name) LIKE ? OR lower(email) LIKE ?' : ''
-    const params = search ? [`%${search}%`, `%${search}%`] : []
+    const clauses = ['organisation_id = ?']
+    const params = [req.org.id]
+    if (search) {
+      clauses.push('(lower(name) LIKE ? OR lower(email) LIKE ?)')
+      params.push(`%${search}%`, `%${search}%`)
+    }
+    const where = `WHERE ${clauses.join(' AND ')}`
     const total = db.prepare(`SELECT COUNT(*) AS count FROM mentees ${where}`).get(...params).count
     const rows = db.prepare(`SELECT * FROM mentees ${where} ORDER BY name LIMIT ? OFFSET ?`).all(...params, limit, offset)
     res.json({ mentees: rows.map(menteeFromRow), pagination: { page, limit, total, pages: Math.max(1, Math.ceil(total / limit)) } })
@@ -1489,13 +2082,13 @@ export function createApp({
     }
     const name = req.body.name.trim()
     const email = req.body.email.trim().toLowerCase()
-    const existing = db.prepare('SELECT id FROM mentees WHERE lower(email) = ?').get(email)
+    const existing = db.prepare('SELECT id FROM mentees WHERE organisation_id = ? AND lower(email) = ?').get(req.org.id, email)
     if (existing) {
       res.status(409).json({ error: 'A mentee with this email already exists.' })
       return
     }
-    const mentee = { id: `M-${randomUUID().slice(0, 8).toUpperCase()}`, name, email }
-    db.prepare('INSERT INTO mentees (id, name, email) VALUES (?, ?, ?)').run(mentee.id, name, email)
+    const mentee = { id: `M-${randomUUID().slice(0, 8).toUpperCase()}`, organisationId: req.org.id, name, email }
+    db.prepare('INSERT INTO mentees (id, organisation_id, name, email) VALUES (?, ?, ?, ?)').run(mentee.id, req.org.id, name, email)
     res.status(201).json({ mentee: menteeFromRow({ ...mentee }) })
   })
 
@@ -1505,24 +2098,24 @@ export function createApp({
       res.status(400).json({ error: validationError })
       return
     }
-    const existing = db.prepare('SELECT * FROM mentees WHERE id = ?').get(req.params.id)
+    const existing = db.prepare('SELECT * FROM mentees WHERE id = ? AND organisation_id = ?').get(req.params.id, req.org.id)
     if (!existing) {
       res.status(404).json({ error: 'Mentee not found.' })
       return
     }
     const name = req.body.name.trim()
     const email = req.body.email.trim().toLowerCase()
-    const duplicate = db.prepare('SELECT id FROM mentees WHERE lower(email) = ? AND id != ?').get(email, req.params.id)
+    const duplicate = db.prepare('SELECT id FROM mentees WHERE organisation_id = ? AND lower(email) = ? AND id != ?').get(req.org.id, email, req.params.id)
     if (duplicate) {
       res.status(409).json({ error: 'A mentee with this email already exists.' })
       return
     }
-    db.prepare('UPDATE mentees SET name = ?, email = ? WHERE id = ?').run(name, email, req.params.id)
-    res.json({ mentee: menteeFromRow(db.prepare('SELECT * FROM mentees WHERE id = ?').get(req.params.id)) })
+    db.prepare('UPDATE mentees SET name = ?, email = ? WHERE id = ? AND organisation_id = ?').run(name, email, req.params.id, req.org.id)
+    res.json({ mentee: menteeFromRow(db.prepare('SELECT * FROM mentees WHERE id = ? AND organisation_id = ?').get(req.params.id, req.org.id)) })
   })
 
   router.delete('/mentees/:id', verifyCsrf, (req, res) => {
-    const deleted = db.prepare('DELETE FROM mentees WHERE id = ?').run(req.params.id)
+    const deleted = db.prepare('DELETE FROM mentees WHERE id = ? AND organisation_id = ?').run(req.params.id, req.org.id)
     if (!deleted.changes) {
       res.status(404).json({ error: 'Mentee not found.' })
       return
@@ -1533,8 +2126,13 @@ export function createApp({
   router.get('/assessments', (req, res) => {
     const { page, limit, offset } = pagination(req)
     const search = typeof req.query.search === 'string' ? req.query.search.trim().toLowerCase() : ''
-    const where = search ? 'WHERE lower(title) LIKE ? OR lower(description) LIKE ?' : ''
-    const params = search ? [`%${search}%`, `%${search}%`] : []
+    const clauses = ['organisation_id = ?']
+    const params = [req.org.id]
+    if (search) {
+      clauses.push('(lower(title) LIKE ? OR lower(description) LIKE ?)')
+      params.push(`%${search}%`, `%${search}%`)
+    }
+    const where = `WHERE ${clauses.join(' AND ')}`
     const total = db.prepare(`SELECT COUNT(*) AS count FROM assessments ${where}`).get(...params).count
     const rows = db.prepare(`SELECT * FROM assessments ${where} ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`).all(...params, limit, offset)
     res.json({ assessments: rows.map((row) => assessmentFromRow(db, row)), pagination: { page, limit, total, pages: Math.max(1, Math.ceil(total / limit)) } })
@@ -1551,8 +2149,8 @@ export function createApp({
     const menteeIds = req.body.menteeIds
     const questionPlaceholders = questionIds.map(() => '?').join(', ')
     const menteePlaceholders = menteeIds.map(() => '?').join(', ')
-    const foundQuestions = db.prepare(`SELECT COUNT(*) AS count FROM questions WHERE id IN (${questionPlaceholders})`).get(...questionIds).count
-    const foundMentees = db.prepare(`SELECT COUNT(*) AS count FROM mentees WHERE id IN (${menteePlaceholders})`).get(...menteeIds).count
+    const foundQuestions = db.prepare(`SELECT COUNT(*) AS count FROM questions WHERE organisation_id = ? AND id IN (${questionPlaceholders})`).get(req.org.id, ...questionIds).count
+    const foundMentees = db.prepare(`SELECT COUNT(*) AS count FROM mentees WHERE organisation_id = ? AND id IN (${menteePlaceholders})`).get(req.org.id, ...menteeIds).count
     if (foundQuestions !== questionIds.length || foundMentees !== menteeIds.length) {
       res.status(400).json({ error: 'Choose existing questions and mentees from this workspace.' })
       return
@@ -1564,13 +2162,14 @@ export function createApp({
     const insertAssessment = db.transaction(() => {
       db.prepare(`
         INSERT INTO assessments (
-          id, title, description, max_attempts, time_limit_minutes, available_from, available_until,
+          id, organisation_id, title, description, max_attempts, time_limit_minutes, available_from, available_until,
           shuffle_questions, shuffle_options, navigation_mode, feedback_policy, results_released,
           security_mode, require_fullscreen, status, created_at, updated_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, 'Draft', ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, 'Draft', ?, ?)
       `).run(
         assessmentId,
+        req.org.id,
         settings.title,
         settings.description,
         settings.maxAttempts,
@@ -1602,7 +2201,7 @@ export function createApp({
       res.status(400).json({ error: 'Choose Published or Paused.' })
       return
     }
-    const existing = db.prepare('SELECT * FROM assessments WHERE id = ?').get(req.params.id)
+    const existing = db.prepare('SELECT * FROM assessments WHERE id = ? AND organisation_id = ?').get(req.params.id, req.org.id)
     if (!existing) {
       res.status(404).json({ error: 'Assessment not found.' })
       return
@@ -1612,22 +2211,23 @@ export function createApp({
       return
     }
     const updatedAt = new Date().toISOString()
-    db.prepare('UPDATE assessments SET status = ?, updated_at = ? WHERE id = ?').run(status, updatedAt, req.params.id)
+    db.prepare('UPDATE assessments SET status = ?, updated_at = ? WHERE id = ? AND organisation_id = ?').run(status, updatedAt, req.params.id, req.org.id)
     const row = db.prepare('SELECT * FROM assessments WHERE id = ?').get(req.params.id)
     res.json({ assessment: assessmentFromRow(db, row) })
   })
 
   router.post('/assessments/:id/release-results', verifyCsrf, (req, res) => {
-    const existing = db.prepare('SELECT * FROM assessments WHERE id = ?').get(req.params.id)
+    const existing = db.prepare('SELECT * FROM assessments WHERE id = ? AND organisation_id = ?').get(req.params.id, req.org.id)
     if (!existing) {
       res.status(404).json({ error: 'Assessment not found.' })
       return
     }
     const updatedAt = new Date().toISOString()
     db.transaction(() => {
-      db.prepare('UPDATE assessments SET results_released = 1, updated_at = ? WHERE id = ?').run(updatedAt, req.params.id)
+      db.prepare('UPDATE assessments SET results_released = 1, updated_at = ? WHERE id = ? AND organisation_id = ?').run(updatedAt, req.params.id, req.org.id)
       logAudit(db, {
-        actor: req.session.admin.name,
+        organisationId: req.org.id,
+        actor: req.session.user.name,
         action: 'release_results',
         entityType: 'assessment',
         entityId: req.params.id,
@@ -1639,7 +2239,7 @@ export function createApp({
   })
 
   router.post('/assessments/:id/extra-attempts', verifyCsrf, (req, res) => {
-    const assessment = db.prepare('SELECT * FROM assessments WHERE id = ?').get(req.params.id)
+    const assessment = db.prepare('SELECT * FROM assessments WHERE id = ? AND organisation_id = ?').get(req.params.id, req.org.id)
     if (!assessment) {
       res.status(404).json({ error: 'Assessment not found.' })
       return
@@ -1668,9 +2268,10 @@ export function createApp({
       db.prepare(`
         INSERT INTO extra_attempt_grants (id, assessment_id, mentee_id, extra_attempts, reason, granted_by, created_at)
         VALUES (?, ?, ?, ?, ?, ?, ?)
-      `).run(id, req.params.id, menteeId, extraAttempts, reason, req.session.admin.name, createdAt)
+      `).run(id, req.params.id, menteeId, extraAttempts, reason, req.session.user.name, createdAt)
       logAudit(db, {
-        actor: req.session.admin.name,
+        organisationId: req.org.id,
+        actor: req.session.user.name,
         action: 'grant_extra_attempts',
         entityType: 'assessment',
         entityId: req.params.id,
@@ -1686,7 +2287,7 @@ export function createApp({
   })
 
   router.patch('/assessments/:id', verifyCsrf, (req, res) => {
-    const existing = db.prepare('SELECT * FROM assessments WHERE id = ?').get(req.params.id)
+    const existing = db.prepare('SELECT * FROM assessments WHERE id = ? AND organisation_id = ?').get(req.params.id, req.org.id)
     if (!existing) {
       res.status(404).json({ error: 'Assessment not found.' })
       return
@@ -1702,8 +2303,8 @@ export function createApp({
     }
     const questionPlaceholders = req.body.questionIds.map(() => '?').join(', ')
     const menteePlaceholders = req.body.menteeIds.map(() => '?').join(', ')
-    const foundQuestions = db.prepare(`SELECT COUNT(*) AS count FROM questions WHERE id IN (${questionPlaceholders})`).get(...req.body.questionIds).count
-    const foundMentees = db.prepare(`SELECT COUNT(*) AS count FROM mentees WHERE id IN (${menteePlaceholders})`).get(...req.body.menteeIds).count
+    const foundQuestions = db.prepare(`SELECT COUNT(*) AS count FROM questions WHERE organisation_id = ? AND id IN (${questionPlaceholders})`).get(req.org.id, ...req.body.questionIds).count
+    const foundMentees = db.prepare(`SELECT COUNT(*) AS count FROM mentees WHERE organisation_id = ? AND id IN (${menteePlaceholders})`).get(req.org.id, ...req.body.menteeIds).count
     if (foundQuestions !== req.body.questionIds.length || foundMentees !== req.body.menteeIds.length) {
       res.status(400).json({ error: 'Choose existing questions and mentees from this workspace.' })
       return
@@ -1717,7 +2318,7 @@ export function createApp({
             available_from = ?, available_until = ?, shuffle_questions = ?, shuffle_options = ?,
             navigation_mode = ?, feedback_policy = ?, security_mode = ?, require_fullscreen = ?,
             updated_at = ?
-        WHERE id = ?
+        WHERE id = ? AND organisation_id = ?
       `).run(
         settings.title,
         settings.description,
@@ -1733,6 +2334,7 @@ export function createApp({
         settings.requireFullscreen,
         now,
         req.params.id,
+        req.org.id,
       )
       db.prepare('DELETE FROM assessment_questions WHERE assessment_id = ?').run(req.params.id)
       db.prepare('DELETE FROM assessment_assignments WHERE assessment_id = ?').run(req.params.id)
@@ -1747,7 +2349,7 @@ export function createApp({
   })
 
   router.delete('/assessments/:id', verifyCsrf, (req, res) => {
-    const existing = db.prepare('SELECT * FROM assessments WHERE id = ?').get(req.params.id)
+    const existing = db.prepare('SELECT * FROM assessments WHERE id = ? AND organisation_id = ?').get(req.params.id, req.org.id)
     if (!existing) {
       res.status(404).json({ error: 'Assessment not found.' })
       return
@@ -1756,7 +2358,7 @@ export function createApp({
       res.status(409).json({ error: 'Only draft assessments can be deleted.' })
       return
     }
-    db.prepare('DELETE FROM assessments WHERE id = ?').run(req.params.id)
+    db.prepare('DELETE FROM assessments WHERE id = ? AND organisation_id = ?').run(req.params.id, req.org.id)
     res.json({ ok: true })
   })
 
@@ -1764,8 +2366,8 @@ export function createApp({
     const { page, limit, offset } = pagination(req)
     const search = typeof req.query.search === 'string' ? req.query.search.trim().toLowerCase() : ''
     const status = typeof req.query.status === 'string' ? req.query.status : ''
-    const clauses = []
-    const params = []
+    const clauses = ['organisation_id = ?']
+    const params = [req.org.id]
     if (search) {
       clauses.push('(lower(student) LIKE ? OR lower(assessment) LIKE ? OR lower(answer) LIKE ?)')
       params.push(`%${search}%`, `%${search}%`, `%${search}%`)
@@ -1774,7 +2376,7 @@ export function createApp({
       clauses.push('(status = ? OR review_decision = ?)')
       params.push(status, status)
     }
-    const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : ''
+    const where = `WHERE ${clauses.join(' AND ')}`
     const total = db.prepare(`SELECT COUNT(*) AS count FROM answers ${where}`).get(...params).count
     const rows = db.prepare(`SELECT * FROM answers ${where} ORDER BY submitted_at DESC LIMIT ? OFFSET ?`).all(...params, limit, offset)
     res.json({
@@ -1793,7 +2395,7 @@ export function createApp({
       res.status(400).json({ error: 'Feedback is required for a revision request and must be 5000 characters or fewer.' })
       return
     }
-    const existing = db.prepare('SELECT * FROM answers WHERE id = ?').get(req.params.id)
+    const existing = db.prepare('SELECT * FROM answers WHERE id = ? AND organisation_id = ?').get(req.params.id, req.org.id)
     if (!existing) {
       res.status(404).json({ error: 'Submission not found.' })
       return
@@ -1851,17 +2453,18 @@ export function createApp({
         UPDATE answers
         SET status = 'Reviewed', review_decision = ?, feedback = ?, reviewed_by = ?, reviewed_at = ?,
             items_json = ?, score = ?, earned_points = ?, max_points = ?
-        WHERE id = ?
+        WHERE id = ? AND organisation_id = ?
       `).run(
         decision,
         feedback.trim(),
-        req.session.admin.name,
+        req.session.user.name,
         reviewedAt,
         JSON.stringify(existingItems),
         nextScore,
         nextEarned,
         nextMax,
         req.params.id,
+        req.org.id,
       )
       if (existing.attempt_id) {
         db.prepare(`
@@ -1873,7 +2476,7 @@ export function createApp({
       db.prepare(`
         INSERT INTO review_history (entity_type, entity_id, actor, decision, note, created_at)
         VALUES ('answer', ?, ?, ?, ?, ?)
-      `).run(req.params.id, req.session.admin.name, decision, feedback.trim(), reviewedAt)
+      `).run(req.params.id, req.session.user.name, decision, feedback.trim(), reviewedAt)
     })
     updateReview()
     const row = db.prepare('SELECT * FROM answers WHERE id = ?').get(req.params.id)
@@ -1886,7 +2489,12 @@ export function createApp({
   })
 
   router.get('/attempts/:attemptId/security-events', (req, res) => {
-    const attempt = db.prepare('SELECT id, status, termination_reason AS terminationReason FROM assessment_attempts WHERE id = ?').get(req.params.attemptId)
+    const attempt = db.prepare(`
+      SELECT aa.id, aa.status, aa.termination_reason AS terminationReason
+      FROM assessment_attempts aa
+      JOIN assessments a ON a.id = aa.assessment_id
+      WHERE aa.id = ? AND a.organisation_id = ?
+    `).get(req.params.attemptId, req.org.id)
     if (!attempt) {
       res.status(404).json({ error: 'Attempt not found.' })
       return
@@ -1902,8 +2510,13 @@ export function createApp({
   router.get('/flags', (req, res) => {
     const { page, limit, offset } = pagination(req)
     const search = typeof req.query.search === 'string' ? req.query.search.trim().toLowerCase() : ''
-    const where = search ? 'WHERE lower(student) LIKE ? OR lower(assessment) LIKE ? OR lower(signal) LIKE ?' : ''
-    const params = search ? [`%${search}%`, `%${search}%`, `%${search}%`] : []
+    const clauses = ['organisation_id = ?']
+    const params = [req.org.id]
+    if (search) {
+      clauses.push('(lower(student) LIKE ? OR lower(assessment) LIKE ? OR lower(signal) LIKE ?)')
+      params.push(`%${search}%`, `%${search}%`, `%${search}%`)
+    }
+    const where = `WHERE ${clauses.join(' AND ')}`
     const total = db.prepare(`SELECT COUNT(*) AS count FROM flags ${where}`).get(...params).count
     const rows = db.prepare(`SELECT * FROM flags ${where} ORDER BY id DESC LIMIT ? OFFSET ?`).all(...params, limit, offset)
     res.json({
@@ -1923,9 +2536,9 @@ export function createApp({
     }
     const id = `F-${randomUUID().slice(0, 8).toUpperCase()}`
     db.prepare(`
-      INSERT INTO flags (id, student, initials, assessment, signal, detail, level)
-      VALUES (?, ?, ?, ?, ?, ?, 'Needs review')
-    `).run(id, student, initialsFor(student), assessment, signal, detail)
+      INSERT INTO flags (id, organisation_id, student, initials, assessment, signal, detail, level)
+      VALUES (?, ?, ?, ?, ?, ?, ?, 'Needs review')
+    `).run(id, req.org.id, student, initialsFor(student), assessment, signal, detail)
     const row = db.prepare('SELECT * FROM flags WHERE id = ?').get(id)
     res.status(201).json({ flag: { ...flagFromRow(row), reviewHistory: [] } })
   })
@@ -1940,7 +2553,7 @@ export function createApp({
       res.status(400).json({ error: 'A review note of 1 to 5000 characters is required.' })
       return
     }
-    const existing = db.prepare('SELECT id FROM flags WHERE id = ?').get(req.params.id)
+    const existing = db.prepare('SELECT id FROM flags WHERE id = ? AND organisation_id = ?').get(req.params.id, req.org.id)
     if (!existing) {
       res.status(404).json({ error: 'Integrity signal not found.' })
       return
@@ -1949,12 +2562,12 @@ export function createApp({
     const updateReview = db.transaction(() => {
       db.prepare(`
         UPDATE flags SET level = ?, review_note = ?, reviewed_by = ?, reviewed_at = ?
-        WHERE id = ?
-      `).run(decision, note.trim(), req.session.admin.name, reviewedAt, req.params.id)
+        WHERE id = ? AND organisation_id = ?
+      `).run(decision, note.trim(), req.session.user.name, reviewedAt, req.params.id, req.org.id)
       db.prepare(`
         INSERT INTO review_history (entity_type, entity_id, actor, decision, note, created_at)
         VALUES ('flag', ?, ?, ?, ?, ?)
-      `).run(req.params.id, req.session.admin.name, decision, note.trim(), reviewedAt)
+      `).run(req.params.id, req.session.user.name, decision, note.trim(), reviewedAt)
     })
     updateReview()
     const row = db.prepare('SELECT * FROM flags WHERE id = ?').get(req.params.id)
@@ -1967,16 +2580,16 @@ export function createApp({
   })
 
   router.get('/dashboard/summary', (req, res) => {
-    const totalStudents = db.prepare('SELECT COUNT(*) AS count FROM mentees').get().count
-    const totalQuestions = db.prepare('SELECT COUNT(*) AS count FROM questions').get().count
-    const pendingAnswers = db.prepare("SELECT COUNT(*) AS count FROM answers WHERE status = 'Needs review'").get().count
-    const unresolvedFlags = db.prepare("SELECT COUNT(*) AS count FROM flags WHERE level != 'Dismissed'").get().count
+    const totalStudents = db.prepare('SELECT COUNT(*) AS count FROM mentees WHERE organisation_id = ?').get(req.org.id).count
+    const totalQuestions = db.prepare('SELECT COUNT(*) AS count FROM questions WHERE organisation_id = ?').get(req.org.id).count
+    const pendingAnswers = db.prepare("SELECT COUNT(*) AS count FROM answers WHERE organisation_id = ? AND status = 'Needs review'").get(req.org.id).count
+    const unresolvedFlags = db.prepare("SELECT COUNT(*) AS count FROM flags WHERE organisation_id = ? AND level != 'Dismissed'").get(req.org.id).count
     const activityRows = db.prepare(`
       SELECT date(submitted_at) AS date, COUNT(*) AS count
       FROM answers
-      WHERE submitted_at >= datetime('now', '-6 days')
+      WHERE organisation_id = ? AND submitted_at >= datetime('now', '-6 days')
       GROUP BY date(submitted_at)
-    `).all()
+    `).all(req.org.id)
     const activityByDate = new Map(activityRows.map((row) => [row.date, row.count]))
     const weeklyActivity = Array.from({ length: 7 }, (_, index) => {
       const date = new Date()
@@ -1996,12 +2609,18 @@ export function createApp({
       res.status(400).json({ error: 'An entity type and ID are required.' })
       return
     }
+    const table = entityType === 'answer' ? 'answers' : 'flags'
+    const owned = db.prepare(`SELECT 1 FROM ${table} WHERE id = ? AND organisation_id = ?`).get(entityId, req.org.id)
+    if (!owned) {
+      res.status(404).json({ error: 'Entity not found.' })
+      return
+    }
     const history = getReviewHistory(db, entityType, entityId)
     res.json({ history })
   })
 
   router.get('/assessments/:id/analytics', (req, res) => {
-    const assessment = db.prepare('SELECT * FROM assessments WHERE id = ?').get(req.params.id)
+    const assessment = db.prepare('SELECT * FROM assessments WHERE id = ? AND organisation_id = ?').get(req.params.id, req.org.id)
     if (!assessment) {
       res.status(404).json({ error: 'Assessment not found.' })
       return
@@ -2108,7 +2727,7 @@ export function createApp({
   })
 
   router.get('/assessments/:id/export.csv', (req, res) => {
-    const assessment = db.prepare('SELECT * FROM assessments WHERE id = ?').get(req.params.id)
+    const assessment = db.prepare('SELECT * FROM assessments WHERE id = ? AND organisation_id = ?').get(req.params.id, req.org.id)
     if (!assessment) {
       res.status(404).json({ error: 'Assessment not found.' })
       return
@@ -2157,7 +2776,8 @@ export function createApp({
     ]
 
     logAudit(db, {
-      actor: req.session.admin.name,
+      organisationId: req.org.id,
+      actor: req.session.user.name,
       action: 'export_csv',
       entityType: 'assessment',
       entityId: assessment.id,
@@ -2170,7 +2790,7 @@ export function createApp({
   })
 
   router.get('/mentees/:id/history', (req, res) => {
-    const mentee = db.prepare('SELECT * FROM mentees WHERE id = ?').get(req.params.id)
+    const mentee = db.prepare('SELECT * FROM mentees WHERE id = ? AND organisation_id = ?').get(req.params.id, req.org.id)
     if (!mentee) {
       res.status(404).json({ error: 'Mentee not found.' })
       return
@@ -2232,186 +2852,21 @@ export function createApp({
 
   router.get('/audit-logs', (req, res) => {
     const { page, limit, offset } = pagination(req, 25)
-    const total = db.prepare('SELECT COUNT(*) AS count FROM audit_logs').get().count
-    const rows = db.prepare('SELECT * FROM audit_logs ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?').all(limit, offset)
+    const total = db.prepare('SELECT COUNT(*) AS count FROM audit_logs WHERE organisation_id = ?').get(req.org.id).count
+    const rows = db.prepare('SELECT * FROM audit_logs WHERE organisation_id = ? ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?').all(req.org.id, limit, offset)
     res.json({
       auditLogs: rows.map(auditLogFromRow),
       pagination: { page, limit, total, pages: Math.max(1, Math.ceil(total / limit)) },
     })
   })
 
-  router.get('/members', (req, res) => {
-    const { page, limit, offset } = pagination(req, 100)
-    const search = typeof req.query.search === 'string' ? req.query.search.trim().toLowerCase() : ''
-    const role = typeof req.query.role === 'string' ? req.query.role : ''
-    const clauses = ['m.organisation_id = ?']
-    const params = [organisationId]
-    if (search) {
-      clauses.push('(lower(u.name) LIKE ? OR lower(u.email) LIKE ?)')
-      params.push(`%${search}%`, `%${search}%`)
-    }
-    if (['Owner', 'Admin', 'Mentor', 'Mentee'].includes(role)) {
-      clauses.push('m.role = ?')
-      params.push(role)
-    }
-    const where = `WHERE ${clauses.join(' AND ')}`
-    const total = db.prepare(`
-      SELECT COUNT(*) AS count
-      FROM memberships m
-      JOIN users u ON u.id = m.user_id
-      ${where}
-    `).get(...params).count
-    const rows = db.prepare(`
-      SELECT m.*, u.name, u.email
-      FROM memberships m
-      JOIN users u ON u.id = m.user_id
-      ${where}
-      ORDER BY CASE m.role WHEN 'Owner' THEN 0 WHEN 'Admin' THEN 1 WHEN 'Mentor' THEN 2 ELSE 3 END, m.joined_at DESC
-      LIMIT ? OFFSET ?
-    `).all(...params, limit, offset)
-    res.json({
-      organisation: {
-        id: workspace.organisation.id,
-        slug: workspace.organisation.slug,
-        name: workspace.organisation.name,
-      },
-      members: rows.map(memberFromRow),
-      pagination: { page, limit, total, pages: Math.max(1, Math.ceil(total / limit)) },
-    })
-  })
+  router.get('/members', handleListMembers)
+  router.patch('/members/:id', requireOrgAdmin, verifyCsrf, handleUpdateMember)
+  router.delete('/members/:id', requireOrgAdmin, verifyCsrf, handleDeleteMember)
 
-  router.patch('/members/:id', verifyCsrf, (req, res) => {
-    const existing = db.prepare(`
-      SELECT m.*, u.name, u.email
-      FROM memberships m
-      JOIN users u ON u.id = m.user_id
-      WHERE m.id = ? AND m.organisation_id = ?
-    `).get(req.params.id, organisationId)
-    if (!existing) {
-      res.status(404).json({ error: 'Member not found.' })
-      return
-    }
-    if (existing.role === 'Owner') {
-      res.status(403).json({ error: 'The workspace owner cannot be modified.' })
-      return
-    }
-    const nextRole = req.body?.role !== undefined ? req.body.role : existing.role
-    const nextStatus = req.body?.status !== undefined ? req.body.status : existing.status
-    if (!INVITABLE_ROLES.includes(nextRole)) {
-      res.status(400).json({ error: 'Role must be Admin, Mentor, or Mentee.' })
-      return
-    }
-    if (!MEMBER_STATUSES.includes(nextStatus)) {
-      res.status(400).json({ error: 'Status must be Active or Suspended.' })
-      return
-    }
-    const updateTx = db.transaction(() => {
-      db.prepare(`
-        UPDATE memberships SET role = ?, status = ?
-        WHERE id = ? AND organisation_id = ?
-      `).run(nextRole, nextStatus, req.params.id, organisationId)
-      if (nextRole === 'Mentee') {
-        const existingMentee = db.prepare('SELECT id FROM mentees WHERE lower(email) = ?').get(existing.email.toLowerCase())
-        if (!existingMentee) {
-          db.prepare('INSERT INTO mentees (id, name, email) VALUES (?, ?, ?)').run(
-            `M-${randomUUID().slice(0, 8).toUpperCase()}`,
-            existing.name,
-            existing.email.toLowerCase(),
-          )
-        }
-      }
-    })
-    updateTx()
-    const row = db.prepare(`
-      SELECT m.*, u.name, u.email
-      FROM memberships m
-      JOIN users u ON u.id = m.user_id
-      WHERE m.id = ? AND m.organisation_id = ?
-    `).get(req.params.id, organisationId)
-    res.json({ member: memberFromRow(row) })
-  })
-
-  router.delete('/members/:id', verifyCsrf, (req, res) => {
-    const existing = db.prepare(`
-      SELECT * FROM memberships WHERE id = ? AND organisation_id = ?
-    `).get(req.params.id, organisationId)
-    if (!existing) {
-      res.status(404).json({ error: 'Member not found.' })
-      return
-    }
-    if (existing.role === 'Owner') {
-      res.status(403).json({ error: 'The workspace owner cannot be removed.' })
-      return
-    }
-    db.prepare('DELETE FROM memberships WHERE id = ? AND organisation_id = ?').run(req.params.id, organisationId)
-    res.json({ ok: true })
-  })
-
-  router.get('/invitations', (req, res) => {
-    const { page, limit, offset } = pagination(req, 100)
-    const search = typeof req.query.search === 'string' ? req.query.search.trim().toLowerCase() : ''
-    const clauses = ['organisation_id = ?']
-    const params = [organisationId]
-    if (search) {
-      clauses.push('(lower(id) LIKE ? OR lower(coalesce(email, \'\')) LIKE ?)')
-      params.push(`%${search}%`, `%${search}%`)
-    }
-    const where = `WHERE ${clauses.join(' AND ')}`
-    const total = db.prepare(`SELECT COUNT(*) AS count FROM invitations ${where}`).get(...params).count
-    const rows = db.prepare(`
-      SELECT * FROM invitations ${where}
-      ORDER BY created_at DESC, id DESC
-      LIMIT ? OFFSET ?
-    `).all(...params, limit, offset)
-    res.json({
-      invitations: rows.map(invitationFromRow),
-      pagination: { page, limit, total, pages: Math.max(1, Math.ceil(total / limit)) },
-    })
-  })
-
-  router.post('/invitations', verifyCsrf, (req, res) => {
-    const validationError = validateInvitationCreate(req.body)
-    if (validationError) {
-      res.status(400).json({ error: validationError })
-      return
-    }
-    const type = req.body.type
-    const role = req.body.role
-    const days = Number(req.body.days ?? 7)
-    const maxUses = type === 'email' ? 1 : Number(req.body.maxUses ?? 10)
-    const email = type === 'email' ? req.body.email.trim().toLowerCase() : null
-    const now = new Date()
-    const createdAt = now.toISOString()
-    const expiresAt = new Date(now.getTime() + days * 86400000).toISOString()
-    const id = `INV-${randomUUID().slice(0, 8).toUpperCase()}`
-    const token = `MUNA-${randomBytes(16).toString('base64url')}`
-    const tokenHash = hashInvitationToken(token)
-
-    db.prepare(`
-      INSERT INTO invitations (id, organisation_id, type, email, role, token_hash, created_by, created_at, expires_at, max_uses, uses, revoked)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0)
-    `).run(id, organisationId, type, email, role, tokenHash, req.session.admin.name, createdAt, expiresAt, maxUses)
-
-    const row = db.prepare('SELECT * FROM invitations WHERE id = ?').get(id)
-    res.status(201).json({
-      invitation: {
-        ...invitationFromRow(row),
-        token,
-        acceptPath: `/invite/${token}`,
-      },
-    })
-  })
-
-  router.delete('/invitations/:id', verifyCsrf, (req, res) => {
-    const existing = db.prepare('SELECT * FROM invitations WHERE id = ? AND organisation_id = ?').get(req.params.id, organisationId)
-    if (!existing) {
-      res.status(404).json({ error: 'Invitation not found.' })
-      return
-    }
-    db.prepare('UPDATE invitations SET revoked = 1 WHERE id = ? AND organisation_id = ?').run(req.params.id, organisationId)
-    const row = db.prepare('SELECT * FROM invitations WHERE id = ? AND organisation_id = ?').get(req.params.id, organisationId)
-    res.json({ ok: true, invitation: invitationFromRow(row) })
-  })
+  router.get('/invitations', handleListInvitations)
+  router.post('/invitations', requireOrgAdmin, verifyCsrf, handleCreateInvitation)
+  router.delete('/invitations/:id', requireOrgAdmin, verifyCsrf, handleDeleteInvitation)
 
   app.use('/api', router)
 
