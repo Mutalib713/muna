@@ -2,13 +2,60 @@ import { useState } from 'react'
 import Button from '../components/ui/Button'
 import Input from '../components/ui/Input'
 import { ShieldCheck } from '../icons'
+import { isSupabaseConfigured, supabase } from '../lib/supabase'
+import { useAuth } from '../lib/authContext'
 
 export default function Login() {
+  const { refreshMemberships } = useAuth()
   const [notice, setNotice] = useState('')
+  const [submitting, setSubmitting] = useState(false)
 
-  const handleSubmit = (event) => {
+  const handleSubmit = async (event) => {
     event.preventDefault()
-    setNotice("Sign in isn't connected yet. Your details haven't been sent.")
+    if (!isSupabaseConfigured || !supabase) {
+      setNotice('Supabase is not configured yet. Add VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY to .env.local.')
+      return
+    }
+
+    const formData = new FormData(event.currentTarget)
+    const email = String(formData.get('email') || '').trim()
+    const password = String(formData.get('password') || '')
+
+    setSubmitting(true)
+    setNotice('')
+
+    try {
+      const { data, error } = await supabase.auth.signInWithPassword({ email, password })
+      if (error) {
+        setNotice(error.message)
+        return
+      }
+
+      let memberships = await refreshMemberships()
+
+      // Complete pending mentor organisation creation if user confirmed email after signup
+      const pendingOrg = data.user?.user_metadata?.pending_org_name
+      if (memberships.length === 0 && pendingOrg) {
+        const { error: orgError } = await supabase.rpc('create_organisation', {
+          org_name: pendingOrg,
+        })
+        if (!orgError) {
+          await supabase.auth.updateUser({ data: { pending_org_name: null } })
+          memberships = await refreshMemberships()
+        }
+      }
+
+      const primaryRole = memberships[0]?.role
+      if (primaryRole === 'mentee') {
+        window.location.href = '/#/learner'
+      } else {
+        window.location.href = '/#/dashboard'
+      }
+    } catch (err) {
+      setNotice(err?.message || 'Unable to log in right now.')
+    } finally {
+      setSubmitting(false)
+    }
   }
 
   return (
@@ -48,7 +95,9 @@ export default function Login() {
             <Input id="login-email" label="Email address" name="email" type="email" autoComplete="email" placeholder="you@example.com" required />
             <Input id="login-password" label="Password" name="password" type="password" autoComplete="current-password" placeholder="Enter your password" required />
             {notice && <p className="auth-notice" role="status">{notice}</p>}
-            <Button className="auth-submit" type="submit">Log in</Button>
+            <Button className="auth-submit" type="submit" disabled={submitting}>
+              {submitting ? 'Logging in...' : 'Log in'}
+            </Button>
           </form>
 
           <p className="auth-switch">
