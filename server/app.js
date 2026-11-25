@@ -18,6 +18,7 @@ import {
   memberFromRow,
   menteeFromRow,
   questionFromRow,
+  securityEventFromRow,
 } from './db.js'
 import {
   formatPoints,
@@ -66,6 +67,15 @@ function requireAdmin(req, res, next) {
 
 const NAVIGATION_MODES = ['free', 'sequential']
 const FEEDBACK_POLICIES = ['immediate', 'after_deadline', 'manual']
+const SECURITY_MODES = ['standard', 'strict_web']
+const SECURITY_EVENT_TYPES = [
+  'fullscreen_entered',
+  'fullscreen_exited',
+  'visibility_hidden',
+  'visibility_visible',
+  'window_blur',
+  'window_focus',
+]
 
 function parseOptionalIsoDate(value) {
   if (value === undefined || value === null || value === '') return null
@@ -121,6 +131,10 @@ function validateAssessment(input) {
   if (feedbackPolicy === 'after_deadline' && !availableUntil) {
     return 'Set an availability end date to release feedback after the deadline.'
   }
+  const securityMode = input.securityMode ?? 'standard'
+  if (!SECURITY_MODES.includes(securityMode)) {
+    return 'Security mode must be standard or strict_web.'
+  }
   return null
 }
 
@@ -140,6 +154,8 @@ function normalizeAssessmentSettings(input) {
     shuffleOptions: input.shuffleOptions ? 1 : 0,
     navigationMode: input.navigationMode ?? 'free',
     feedbackPolicy: input.feedbackPolicy ?? 'immediate',
+    securityMode: input.securityMode ?? 'standard',
+    requireFullscreen: input.requireFullscreen ? 1 : 0,
   }
 }
 
@@ -698,6 +714,7 @@ export function createApp({
     submittedAnswers,
     existingAttempt = null,
     status = 'submitted',
+    terminationReason = null,
     submittedAt = new Date().toISOString(),
     allowPartial = false,
   }) {
@@ -756,9 +773,19 @@ export function createApp({
       db.prepare(`
         UPDATE assessment_attempts
         SET answers_json = ?, score = ?, grading_status = ?, earned_points = ?, max_points = ?,
-            status = ?, submitted_at = ?
+            status = ?, termination_reason = ?, submitted_at = ?
         WHERE id = ?
-      `).run(JSON.stringify(storedAnswers), score, gradingStatus, earnedPoints, maxPoints, status, submittedAt, attemptId)
+      `).run(
+        JSON.stringify(storedAnswers),
+        score,
+        gradingStatus,
+        earnedPoints,
+        maxPoints,
+        status,
+        terminationReason,
+        submittedAt,
+        attemptId,
+      )
     } else {
       db.prepare(`
         INSERT INTO assessment_attempts (
@@ -793,6 +820,7 @@ export function createApp({
       attempt: {
         id: attemptId,
         status,
+        terminationReason,
         score,
         earnedPoints,
         maxPoints,
@@ -886,6 +914,8 @@ export function createApp({
           shuffleOptions: Boolean(row.shuffle_options),
           navigationMode: row.navigation_mode || 'free',
           feedbackPolicy: row.feedback_policy || 'immediate',
+          securityMode: row.security_mode || 'standard',
+          requireFullscreen: Boolean(row.require_fullscreen),
           resultsVisible: showResults,
           activeAttempt: activeAttemptRow ? {
             id: activeAttemptRow.id,
@@ -897,6 +927,7 @@ export function createApp({
           latestSubmission: latestRow ? {
             id: latestRow.id,
             status: latestRow.status,
+            terminationReason: latestRow.termination_reason || null,
             submittedAt: latestRow.submitted_at,
             resultsVisible: showResults,
             score: showResults ? latestRow.score : null,
@@ -1093,6 +1124,130 @@ export function createApp({
       WHERE id = ? AND status = 'in_progress'
     `).run(JSON.stringify(answers), now, attempt.id)
     res.json({ ok: true, lastSavedAt: now })
+  })
+
+  router.post('/learner/attempts/:attemptId/security-events', (req, res) => {
+    const menteeId = typeof req.body?.menteeId === 'string' ? req.body.menteeId : ''
+    const eventType = req.body?.eventType
+    const detail = typeof req.body?.detail === 'string' ? req.body.detail.trim().slice(0, 500) : ''
+    const clientTimestamp = parseOptionalIsoDate(req.body?.clientTimestamp)
+    if (!SECURITY_EVENT_TYPES.includes(eventType)) {
+      res.status(400).json({ error: 'Unsupported security event type.' })
+      return
+    }
+    if (clientTimestamp === false) {
+      res.status(400).json({ error: 'Client timestamp must be valid ISO date if provided.' })
+      return
+    }
+
+    const tx = db.transaction(() => {
+      const attempt = db.prepare('SELECT * FROM assessment_attempts WHERE id = ?').get(req.params.attemptId)
+      if (!attempt || attempt.mentee_id !== menteeId) {
+        return { statusCode: 404, error: 'Attempt not found.' }
+      }
+      const assessment = db.prepare('SELECT * FROM assessments WHERE id = ?').get(attempt.assessment_id)
+      const mentee = db.prepare('SELECT * FROM mentees WHERE id = ?').get(menteeId)
+      if (!assessment || !mentee) {
+        return { statusCode: 404, error: 'Assessment not found.' }
+      }
+      if (attempt.status !== 'in_progress') {
+        return {
+          statusCode: 200,
+          alreadyFinalized: true,
+          terminated: attempt.status === 'terminated_focus_lost',
+          status: attempt.status,
+        }
+      }
+
+      const now = new Date().toISOString()
+      const eventId = `SE-${randomUUID().slice(0, 8).toUpperCase()}`
+      db.prepare(`
+        INSERT INTO security_events (
+          id, attempt_id, assessment_id, mentee_id, event_type, detail, client_timestamp, server_timestamp
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(eventId, attempt.id, assessment.id, menteeId, eventType, detail, clientTimestamp, now)
+
+      const isStrictTermination = assessment.security_mode === 'strict_web' && eventType === 'visibility_hidden'
+      if (eventType === 'visibility_hidden' || eventType === 'fullscreen_exited') {
+        const hiddenCount = db.prepare(`
+          SELECT COUNT(*) AS count FROM security_events
+          WHERE attempt_id = ? AND event_type IN ('visibility_hidden', 'fullscreen_exited')
+        `).get(attempt.id).count
+        const existingFlag = db.prepare('SELECT * FROM flags WHERE attempt_id = ?').get(attempt.id)
+        const signalTitle = isStrictTermination
+          ? 'Attempt terminated — page focus lost in strict web mode'
+          : 'Page focus or full-screen change during assessment'
+        const signalDetail = isStrictTermination
+          ? `Strict web mode locked attempt ${attempt.id} on visibility loss (${hiddenCount} signal${hiddenCount === 1 ? '' : 's'}).`
+          : `${hiddenCount} focus/full-screen exit event${hiddenCount === 1 ? '' : 's'} recorded during attempt ${attempt.id}.`
+        if (existingFlag) {
+          db.prepare('UPDATE flags SET signal = ?, detail = ? WHERE id = ?').run(signalTitle, signalDetail, existingFlag.id)
+        } else {
+          const flagId = `F-${randomUUID().slice(0, 8).toUpperCase()}`
+          db.prepare(`
+            INSERT INTO flags (id, attempt_id, student, initials, assessment, signal, detail, level, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, 'Needs review', ?)
+          `).run(flagId, attempt.id, mentee.name, initialsFor(mentee.name), assessment.title, signalTitle, signalDetail, now)
+        }
+      }
+
+      const eventRow = db.prepare('SELECT * FROM security_events WHERE id = ?').get(eventId)
+      if (isStrictTermination) {
+        let draftAnswers
+        try {
+          draftAnswers = JSON.parse(attempt.draft_answers_json || '{}') || {}
+        } catch {
+          draftAnswers = {}
+        }
+        const finalized = finalizeAttemptRecord({
+          assessment,
+          mentee,
+          submittedAnswers: draftAnswers,
+          existingAttempt: attempt,
+          status: 'terminated_focus_lost',
+          terminationReason: 'focus_lost',
+          submittedAt: now,
+          allowPartial: true,
+        })
+        const attemptCount = db.prepare(`
+          SELECT COUNT(*) AS count FROM assessment_attempts
+          WHERE assessment_id = ? AND mentee_id = ?
+        `).get(assessment.id, menteeId).count
+        const allowance = getAttemptAllowance(assessment, menteeId)
+        const showResults = resultsAreVisible(assessment)
+        return {
+          statusCode: 200,
+          recorded: true,
+          terminated: true,
+          reason: 'focus_lost',
+          event: securityEventFromRow(eventRow),
+          attempt: {
+            ...finalized.attempt,
+            score: showResults ? finalized.attempt.score : null,
+            earnedPoints: showResults ? finalized.attempt.earnedPoints : null,
+            maxPoints: showResults ? finalized.attempt.maxPoints : null,
+            resultsVisible: showResults,
+            attemptCount,
+            maxAttempts: allowance.allowedAttempts,
+          },
+        }
+      }
+
+      return {
+        statusCode: 201,
+        recorded: true,
+        terminated: false,
+        event: securityEventFromRow(eventRow),
+      }
+    })
+
+    const outcome = tx.immediate()
+    if (outcome.error) {
+      res.status(outcome.statusCode).json({ error: outcome.error })
+      return
+    }
+    res.status(outcome.statusCode).json(outcome)
   })
 
   router.post('/learner/assessments/:id/attempts', (req, res) => {
@@ -1391,9 +1546,9 @@ export function createApp({
         INSERT INTO assessments (
           id, title, description, max_attempts, time_limit_minutes, available_from, available_until,
           shuffle_questions, shuffle_options, navigation_mode, feedback_policy, results_released,
-          status, created_at, updated_at
+          security_mode, require_fullscreen, status, created_at, updated_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'Draft', ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, 'Draft', ?, ?)
       `).run(
         assessmentId,
         settings.title,
@@ -1406,6 +1561,8 @@ export function createApp({
         settings.shuffleOptions,
         settings.navigationMode,
         settings.feedbackPolicy,
+        settings.securityMode,
+        settings.requireFullscreen,
         now,
         now,
       )
@@ -1520,7 +1677,8 @@ export function createApp({
         UPDATE assessments
         SET title = ?, description = ?, max_attempts = ?, time_limit_minutes = ?,
             available_from = ?, available_until = ?, shuffle_questions = ?, shuffle_options = ?,
-            navigation_mode = ?, feedback_policy = ?, updated_at = ?
+            navigation_mode = ?, feedback_policy = ?, security_mode = ?, require_fullscreen = ?,
+            updated_at = ?
         WHERE id = ?
       `).run(
         settings.title,
@@ -1533,6 +1691,8 @@ export function createApp({
         settings.shuffleOptions,
         settings.navigationMode,
         settings.feedbackPolicy,
+        settings.securityMode,
+        settings.requireFullscreen,
         now,
         req.params.id,
       )
@@ -1685,6 +1845,20 @@ export function createApp({
         reviewHistory: getReviewHistory(db, 'answer', row.id),
       },
     })
+  })
+
+  router.get('/attempts/:attemptId/security-events', (req, res) => {
+    const attempt = db.prepare('SELECT id, status, termination_reason AS terminationReason FROM assessment_attempts WHERE id = ?').get(req.params.attemptId)
+    if (!attempt) {
+      res.status(404).json({ error: 'Attempt not found.' })
+      return
+    }
+    const rows = db.prepare(`
+      SELECT * FROM security_events
+      WHERE attempt_id = ?
+      ORDER BY server_timestamp ASC, id ASC
+    `).all(req.params.attemptId)
+    res.json({ attempt, events: rows.map(securityEventFromRow) })
   })
 
   router.get('/flags', (req, res) => {

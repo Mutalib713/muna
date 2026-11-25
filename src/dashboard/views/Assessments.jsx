@@ -47,6 +47,8 @@ function newAssessmentForm() {
     shuffleOptions: false,
     navigationMode: 'free',
     feedbackPolicy: 'immediate',
+    securityMode: 'standard',
+    requireFullscreen: false,
   }
 }
 
@@ -126,6 +128,8 @@ export default function Assessments({ dashboard }) {
         shuffleOptions: Boolean(form.shuffleOptions),
         navigationMode: form.navigationMode,
         feedbackPolicy: form.feedbackPolicy,
+        securityMode: form.securityMode,
+        requireFullscreen: Boolean(form.requireFullscreen),
       }
       if (editingAssessmentId) await saveAssessmentChanges(editingAssessmentId, input)
       else await saveAssessment(input)
@@ -208,6 +212,8 @@ export default function Assessments({ dashboard }) {
       shuffleOptions: Boolean(assessment.shuffleOptions),
       navigationMode: assessment.navigationMode || 'free',
       feedbackPolicy: assessment.feedbackPolicy || 'immediate',
+      securityMode: assessment.securityMode || 'standard',
+      requireFullscreen: Boolean(assessment.requireFullscreen),
     })
     setFormError('')
     setModalOpen(true)
@@ -277,6 +283,8 @@ export default function Assessments({ dashboard }) {
                     {assessment.shuffleQuestions && <span>Shuffled questions</span>}
                     {assessment.shuffleOptions && <span>Shuffled options</span>}
                     <span>{assessment.resultsReleased ? 'Results released' : (FEEDBACK_LABELS[assessment.feedbackPolicy] || 'Immediate feedback')}</span>
+                    <span>{assessment.securityMode === 'strict_web' ? 'Strict web mode' : 'Standard web mode'}</span>
+                    {assessment.requireFullscreen && <span>Full-screen prompt</span>}
                   </div>
                   {(assessment.availableFrom || assessment.availableUntil) && (
                     <span className="assessment-window-meta">
@@ -382,6 +390,12 @@ export default function Assessments({ dashboard }) {
                   <option value="manual">Manual mentor release</option>
                 </select>
               </label>
+              <label className="form-label">Security profile
+                <select value={form.securityMode} onChange={(event) => setForm({ ...form, securityMode: event.target.value })}>
+                  <option value="standard">Standard web mode (log focus events)</option>
+                  <option value="strict_web">Strict web mode (lock &amp; submit on tab switch)</option>
+                </select>
+              </label>
             </div>
 
             <div className="assessment-toggles">
@@ -393,7 +407,12 @@ export default function Assessments({ dashboard }) {
                 <input type="checkbox" checked={form.shuffleOptions} onChange={(event) => setForm({ ...form, shuffleOptions: event.target.checked })} />
                 <span>Shuffle MCQ option order per attempt</span>
               </label>
+              <label className="checkbox-inline">
+                <input type="checkbox" checked={form.requireFullscreen} onChange={(event) => setForm({ ...form, requireFullscreen: event.target.checked })} />
+                <span>Prompt for full-screen mode on start</span>
+              </label>
             </div>
+            <p className="assessment-choice-empty">Secure assessment mode logs visibility changes and enforces strict termination server-side, but browser-only controls cannot prevent external devices or OS capture.</p>
 
             <fieldset className="assessment-choice-group">
               <legend>Choose questions <span>{form.questionIds.length} selected</span></legend>

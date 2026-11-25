@@ -669,3 +669,119 @@ test('assessment delivery rules: availability windows, start/resume idempotency,
 
   db.close()
 })
+
+test('secure web mode logs visibility events, surfaces integrity flags, and enforces strict focus-loss termination', async () => {
+  const db = createDatabase(':memory:')
+  const app = createApp({
+    db,
+    setupCode: 'test-setup-code',
+    sessionSecret: 'test-session-secret-long-enough-for-tests',
+  })
+  const client = request.agent(app)
+  const csrf = (await client.get('/api/auth/csrf')).body.csrfToken
+  const setup = await client.post('/api/auth/setup')
+    .set('X-CSRF-Token', csrf)
+    .send({
+      name: 'Mentor Lead',
+      email: 'mentor@example.test',
+      password: 'test-admin-password-2026',
+      confirmPassword: 'test-admin-password-2026',
+      setupCode: 'test-setup-code',
+    })
+  const adminCsrf = setup.body.csrfToken
+
+  const q1 = (await client.post('/api/questions').set('X-CSRF-Token', adminCsrf).send({
+    prompt: 'What does TLS protect?',
+    options: ['Data in transit', 'Physical CPU'],
+    correctAnswer: 'Data in transit',
+    points: 4,
+  })).body.question
+  const q2 = (await client.post('/api/questions').set('X-CSRF-Token', adminCsrf).send({
+    prompt: 'HTTP 403 means?',
+    options: ['Forbidden', 'Created'],
+    correctAnswer: 'Forbidden',
+    points: 4,
+  })).body.question
+  const mentee = (await client.post('/api/mentees').set('X-CSRF-Token', adminCsrf).send({
+    name: 'Samir Patel',
+    email: 'samir@example.test',
+  })).body.mentee
+
+  // Standard web mode logs focus loss and raises a flag without terminating
+  const stdAssessment = (await client.post('/api/assessments').set('X-CSRF-Token', adminCsrf).send({
+    title: 'Standard Practice',
+    questionIds: [q1.id],
+    menteeIds: [mentee.id],
+    securityMode: 'standard',
+    requireFullscreen: true,
+  })).body.assessment
+  await client.patch(`/api/assessments/${stdAssessment.id}/status`).set('X-CSRF-Token', adminCsrf).send({ status: 'Published' })
+  const stdStart = await client.post(`/api/learner/assessments/${stdAssessment.id}/start`).send({ menteeId: mentee.id })
+  const stdEvent = await client.post(`/api/learner/attempts/${stdStart.body.attempt.id}/security-events`).send({
+    menteeId: mentee.id,
+    eventType: 'visibility_hidden',
+    detail: 'Switched tab briefly',
+  })
+  assert.equal(stdEvent.status, 201)
+  assert.equal(stdEvent.body.terminated, false)
+
+  // Strict web mode locks & submits last autosaved draft on visibility_hidden
+  const strictAssessment = (await client.post('/api/assessments').set('X-CSRF-Token', adminCsrf).send({
+    title: 'Strict Security Exam',
+    questionIds: [q1.id, q2.id],
+    menteeIds: [mentee.id],
+    securityMode: 'strict_web',
+    requireFullscreen: true,
+  })).body.assessment
+  await client.patch(`/api/assessments/${strictAssessment.id}/status`).set('X-CSRF-Token', adminCsrf).send({ status: 'Published' })
+
+  const strictStart = await client.post(`/api/learner/assessments/${strictAssessment.id}/start`).send({ menteeId: mentee.id })
+  const strictAttemptId = strictStart.body.attempt.id
+
+  // Autosave q1 before leaving tab
+  await client.put(`/api/learner/attempts/${strictAttemptId}/responses`).send({
+    menteeId: mentee.id,
+    answers: { [q1.id]: 'Data in transit' },
+  })
+
+  // Secondary blur event logs without terminating
+  const blurEvent = await client.post(`/api/learner/attempts/${strictAttemptId}/security-events`).send({
+    menteeId: mentee.id,
+    eventType: 'window_blur',
+  })
+  assert.equal(blurEvent.status, 201)
+  assert.equal(blurEvent.body.terminated, false)
+
+  // First confirmed visibility_hidden terminates attempt and saves last autosaved draft
+  const hiddenEvent = await client.post(`/api/learner/attempts/${strictAttemptId}/security-events`).send({
+    menteeId: mentee.id,
+    eventType: 'visibility_hidden',
+    detail: 'Tab switched',
+  })
+  assert.equal(hiddenEvent.status, 200)
+  assert.equal(hiddenEvent.body.terminated, true)
+  assert.equal(hiddenEvent.body.reason, 'focus_lost')
+  assert.equal(hiddenEvent.body.attempt.status, 'terminated_focus_lost')
+  assert.equal(hiddenEvent.body.attempt.score, '4 / 8')
+
+  // Further submit on terminated attempt is rejected with 409
+  const lateSubmit = await client.post(`/api/learner/assessments/${strictAssessment.id}/attempts`).send({
+    menteeId: mentee.id,
+    attemptId: strictAttemptId,
+    answers: { [q1.id]: 'Data in transit', [q2.id]: 'Forbidden' },
+  })
+  assert.equal(lateSubmit.status, 409)
+
+  // Admin flags include linked attemptId and full event timeline
+  const flagsRes = await client.get('/api/flags')
+  const strictFlag = flagsRes.body.flags.find((f) => f.attemptId === strictAttemptId)
+  assert.ok(strictFlag)
+  assert.match(strictFlag.signal, /terminated/i)
+
+  const timelineRes = await client.get(`/api/attempts/${strictAttemptId}/security-events`)
+  assert.equal(timelineRes.status, 200)
+  assert.equal(timelineRes.body.attempt.status, 'terminated_focus_lost')
+  assert.equal(timelineRes.body.events.length, 2)
+
+  db.close()
+})

@@ -43,10 +43,12 @@ export default function LearnerAssessment({ hash }) {
   const [nowMs, setNowMs] = useState(() => Date.now())
   const [starting, setStarting] = useState(false)
   const [submitting, setSubmitting] = useState(false)
+  const [isFullscreen, setIsFullscreen] = useState(false)
   const [error, setError] = useState('')
   const [result, setResult] = useState(null)
   const answersRef = useRef({})
   const autoSubmittedRef = useRef(false)
+  const fullscreenSupported = typeof document !== 'undefined' && Boolean(document.documentElement?.requestFullscreen)
 
   useEffect(() => {
     answersRef.current = answers
@@ -181,11 +183,78 @@ export default function LearnerAssessment({ hash }) {
     return () => window.clearInterval(interval)
   }, [activeAttempt?.expiresAt, submitAttempt])
 
+  const recordSecurityEvent = useCallback(async (attemptId, eventType, detail = '') => {
+    if (!attemptId) return
+    try {
+      const response = await fetch(`/api/learner/attempts/${encodeURIComponent(attemptId)}/security-events`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        keepalive: true,
+        body: JSON.stringify({
+          menteeId,
+          eventType,
+          detail,
+          clientTimestamp: new Date().toISOString(),
+        }),
+      })
+      const payload = await response.json()
+      if (response.ok && payload.terminated && payload.attempt) {
+        setResult(payload.attempt)
+        setActiveAttempt(null)
+        await loadAssessments(menteeId, selectedId)
+      }
+    } catch {
+      // Best-effort event telemetry; server state remains authoritative.
+    }
+  }, [menteeId, selectedId, loadAssessments])
+
+  useEffect(() => {
+    if (!activeAttempt?.id) return undefined
+    const attemptId = activeAttempt.id
+    const onVisibilityChange = () => {
+      if (document.visibilityState === 'hidden') {
+        recordSecurityEvent(attemptId, 'visibility_hidden', 'Document visibility changed to hidden')
+      } else {
+        recordSecurityEvent(attemptId, 'visibility_visible', 'Document visibility restored')
+      }
+    }
+    const onWindowBlur = () => recordSecurityEvent(attemptId, 'window_blur')
+    const onWindowFocus = () => recordSecurityEvent(attemptId, 'window_focus')
+    const onFullscreenChange = () => {
+      const activeFs = Boolean(document.fullscreenElement)
+      setIsFullscreen(activeFs)
+      recordSecurityEvent(attemptId, activeFs ? 'fullscreen_entered' : 'fullscreen_exited')
+    }
+    document.addEventListener('visibilitychange', onVisibilityChange)
+    window.addEventListener('blur', onWindowBlur)
+    window.addEventListener('focus', onWindowFocus)
+    document.addEventListener('fullscreenchange', onFullscreenChange)
+    return () => {
+      document.removeEventListener('visibilitychange', onVisibilityChange)
+      window.removeEventListener('blur', onWindowBlur)
+      window.removeEventListener('focus', onWindowFocus)
+      document.removeEventListener('fullscreenchange', onFullscreenChange)
+    }
+  }, [activeAttempt?.id, recordSecurityEvent])
+
+  async function requestFullscreenMode() {
+    if (!fullscreenSupported || document.fullscreenElement) return
+    try {
+      await document.documentElement.requestFullscreen()
+      setIsFullscreen(true)
+    } catch {
+      // Full-screen can be declined by the browser/OS; continue with visibility monitoring.
+    }
+  }
+
   async function startAttempt() {
     if (!selected) return
     setError('')
     setResult(null)
     setStarting(true)
+    if (selected.requireFullscreen || selected.securityMode === 'strict_web') {
+      requestFullscreenMode()
+    }
     try {
       const response = await fetch(`/api/learner/assessments/${encodeURIComponent(selected.id)}/start`, {
         method: 'POST',
@@ -291,16 +360,28 @@ export default function LearnerAssessment({ hash }) {
                     {selected.availabilityState === 'open' && (selected.availableUntil ? `Open until ${formatDateTime(selected.availableUntil)}` : 'Open')}
                   </dd></div>
                   <div><dt>Feedback</dt><dd>{FEEDBACK_POLICY_COPY[selected.feedbackPolicy] || FEEDBACK_POLICY_COPY.immediate}</dd></div>
+                  <div><dt>Security mode</dt><dd>{selected.securityMode === 'strict_web' ? 'Strict web mode (locks on tab switch)' : 'Standard web mode'}</dd></div>
+                  <div><dt>Readiness</dt><dd>{fullscreenSupported ? 'Browser ready (full-screen supported)' : 'Browser ready (full-screen unavailable)'}</dd></div>
                 </dl>
 
                 <p className="assessment-draft-note">
-                  Starting an assessment consumes <strong>1 attempt</strong>. Your answers autosave as you work, and refreshing resumes an active attempt.
+                  Starting an assessment consumes <strong>1 attempt</strong>. Your answers autosave as you work, and refreshing resumes an active attempt.{' '}
+                  {selected.securityMode === 'strict_web'
+                    ? 'Under strict web mode, switching tabs or leaving the page will lock and submit your last saved answers for mentor review.'
+                    : 'Visibility and focus transitions are logged with server timestamps for mentor review.'}
                 </p>
 
                 {result && (
-                  <div className="learner-receipt" role="status">
-                    <strong>Attempt submitted</strong>
+                  <div className={`learner-receipt ${result.status === 'terminated_focus_lost' ? 'learner-terminated' : ''}`} role="status">
+                    <strong>
+                      {result.status === 'terminated_focus_lost'
+                        ? 'Attempt terminated — focus lost'
+                        : 'Attempt submitted'}
+                    </strong>
                     <span>Submitted: {formatDateTime(result.submittedAt)} · Attempt {result.attemptCount} of {result.maxAttempts}</span>
+                    {result.status === 'terminated_focus_lost' && (
+                      <span>Your last server-acknowledged answers were saved and logged for mentor review.</span>
+                    )}
                     <span>
                       {result.resultsVisible
                         ? `Score: ${result.score}${result.needsManualGrading ? ' (pending mentor review for manual items)' : ''}`
@@ -310,8 +391,12 @@ export default function LearnerAssessment({ hash }) {
                 )}
 
                 {!result && selected.latestSubmission && (
-                  <div className="learner-receipt">
-                    <strong>Latest submission ({selected.latestSubmission.status})</strong>
+                  <div className={`learner-receipt ${selected.latestSubmission.status === 'terminated_focus_lost' ? 'learner-terminated' : ''}`}>
+                    <strong>
+                      {selected.latestSubmission.status === 'terminated_focus_lost'
+                        ? 'Latest submission (terminated — focus lost)'
+                        : `Latest submission (${selected.latestSubmission.status})`}
+                    </strong>
                     <span>Submitted: {formatDateTime(selected.latestSubmission.submittedAt)}</span>
                     <span>
                       {selected.latestSubmission.resultsVisible
@@ -358,6 +443,13 @@ export default function LearnerAssessment({ hash }) {
                     </button>
                   </div>
                 </div>
+
+                {(selected.requireFullscreen || selected.securityMode === 'strict_web') && fullscreenSupported && !isFullscreen && (
+                  <div className="runner-fullscreen-banner" role="note">
+                    <span>Full-screen mode is recommended for this assessment.</span>
+                    <button type="button" className="small-button" onClick={requestFullscreenMode}>Enter full-screen</button>
+                  </div>
+                )}
 
                 {selected.navigationMode === 'free' && activeQuestions.length > 1 && (
                   <div className="runner-navigator" aria-label="Question navigator">

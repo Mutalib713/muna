@@ -66,7 +66,9 @@ export function createDatabase(filename) {
       level TEXT NOT NULL DEFAULT 'Needs review',
       review_note TEXT,
       reviewed_by TEXT,
-      reviewed_at TEXT
+      reviewed_at TEXT,
+      attempt_id TEXT,
+      created_at TEXT
     );
     CREATE TABLE IF NOT EXISTS review_history (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -97,6 +99,8 @@ export function createDatabase(filename) {
       navigation_mode TEXT NOT NULL DEFAULT 'free' CHECK (navigation_mode IN ('free', 'sequential')),
       feedback_policy TEXT NOT NULL DEFAULT 'immediate' CHECK (feedback_policy IN ('immediate', 'after_deadline', 'manual')),
       results_released INTEGER NOT NULL DEFAULT 0 CHECK (results_released IN (0, 1)),
+      security_mode TEXT NOT NULL DEFAULT 'standard' CHECK (security_mode IN ('standard', 'strict_web')),
+      require_fullscreen INTEGER NOT NULL DEFAULT 0 CHECK (require_fullscreen IN (0, 1)),
       status TEXT NOT NULL DEFAULT 'Draft' CHECK (status IN ('Draft', 'Published', 'Paused')),
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
@@ -122,7 +126,8 @@ export function createDatabase(filename) {
       grading_status TEXT NOT NULL DEFAULT 'Graded',
       earned_points REAL NOT NULL DEFAULT 0,
       max_points REAL NOT NULL DEFAULT 0,
-      status TEXT NOT NULL DEFAULT 'submitted' CHECK (status IN ('in_progress', 'submitted', 'expired')),
+      status TEXT NOT NULL DEFAULT 'submitted' CHECK (status IN ('in_progress', 'submitted', 'expired', 'terminated_focus_lost')),
+      termination_reason TEXT,
       started_at TEXT,
       expires_at TEXT,
       draft_answers_json TEXT NOT NULL DEFAULT '{}',
@@ -133,6 +138,27 @@ export function createDatabase(filename) {
     );
     CREATE INDEX IF NOT EXISTS assessment_attempts_lookup_idx
       ON assessment_attempts (assessment_id, mentee_id, submitted_at);
+    CREATE TABLE IF NOT EXISTS security_events (
+      id TEXT PRIMARY KEY,
+      attempt_id TEXT NOT NULL REFERENCES assessment_attempts(id) ON DELETE CASCADE,
+      assessment_id TEXT NOT NULL REFERENCES assessments(id) ON DELETE CASCADE,
+      mentee_id TEXT NOT NULL REFERENCES mentees(id) ON DELETE CASCADE,
+      event_type TEXT NOT NULL CHECK (event_type IN (
+        'fullscreen_entered',
+        'fullscreen_exited',
+        'visibility_hidden',
+        'visibility_visible',
+        'window_blur',
+        'window_focus'
+      )),
+      detail TEXT NOT NULL DEFAULT '',
+      client_timestamp TEXT,
+      server_timestamp TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS security_events_attempt_idx
+      ON security_events (attempt_id, server_timestamp);
+    CREATE INDEX IF NOT EXISTS security_events_mentee_idx
+      ON security_events (mentee_id, server_timestamp);
     CREATE TABLE IF NOT EXISTS extra_attempt_grants (
       id TEXT PRIMARY KEY,
       assessment_id TEXT NOT NULL REFERENCES assessments(id) ON DELETE CASCADE,
@@ -234,6 +260,57 @@ export function createDatabase(filename) {
   ensureColumn('assessments', 'navigation_mode', "TEXT NOT NULL DEFAULT 'free'")
   ensureColumn('assessments', 'feedback_policy', "TEXT NOT NULL DEFAULT 'immediate'")
   ensureColumn('assessments', 'results_released', 'INTEGER NOT NULL DEFAULT 0')
+  ensureColumn('assessments', 'security_mode', "TEXT NOT NULL DEFAULT 'standard'")
+  ensureColumn('assessments', 'require_fullscreen', 'INTEGER NOT NULL DEFAULT 0')
+  ensureColumn('assessment_attempts', 'termination_reason', 'TEXT')
+  ensureColumn('flags', 'attempt_id', 'TEXT')
+  ensureColumn('flags', 'created_at', 'TEXT')
+
+  // Rebuild assessment_attempts if an older SQLite database lacks 'terminated_focus_lost' in status CHECK.
+  const attemptsTableSql = db.prepare(
+    "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'assessment_attempts'"
+  ).get()?.sql || ''
+  if (attemptsTableSql && !attemptsTableSql.includes('terminated_focus_lost')) {
+    db.pragma('foreign_keys = OFF')
+    db.transaction(() => {
+      db.exec(`
+        CREATE TABLE assessment_attempts_new (
+          id TEXT PRIMARY KEY,
+          assessment_id TEXT NOT NULL REFERENCES assessments(id) ON DELETE CASCADE,
+          mentee_id TEXT NOT NULL REFERENCES mentees(id) ON DELETE CASCADE,
+          answers_json TEXT NOT NULL,
+          score TEXT NOT NULL,
+          grading_status TEXT NOT NULL DEFAULT 'Graded',
+          earned_points REAL NOT NULL DEFAULT 0,
+          max_points REAL NOT NULL DEFAULT 0,
+          status TEXT NOT NULL DEFAULT 'submitted' CHECK (status IN ('in_progress', 'submitted', 'expired', 'terminated_focus_lost')),
+          termination_reason TEXT,
+          started_at TEXT,
+          expires_at TEXT,
+          draft_answers_json TEXT NOT NULL DEFAULT '{}',
+          question_order_json TEXT NOT NULL DEFAULT '[]',
+          option_orders_json TEXT NOT NULL DEFAULT '{}',
+          last_saved_at TEXT,
+          submitted_at TEXT NOT NULL
+        );
+        INSERT INTO assessment_attempts_new (
+          id, assessment_id, mentee_id, answers_json, score, grading_status, earned_points, max_points,
+          status, termination_reason, started_at, expires_at, draft_answers_json, question_order_json,
+          option_orders_json, last_saved_at, submitted_at
+        )
+        SELECT
+          id, assessment_id, mentee_id, answers_json, score, grading_status, earned_points, max_points,
+          status, termination_reason, started_at, expires_at, draft_answers_json, question_order_json,
+          option_orders_json, last_saved_at, submitted_at
+        FROM assessment_attempts;
+        DROP TABLE assessment_attempts;
+        ALTER TABLE assessment_attempts_new RENAME TO assessment_attempts;
+        CREATE INDEX IF NOT EXISTS assessment_attempts_lookup_idx
+          ON assessment_attempts (assessment_id, mentee_id, submitted_at);
+      `)
+    })()
+    db.pragma('foreign_keys = ON')
+  }
 
   const seed = db.transaction(() => {
     if (db.prepare('SELECT COUNT(*) AS count FROM questions').get().count === 0) {
@@ -353,6 +430,7 @@ export function answerFromRow(row) {
 export function flagFromRow(row) {
   return {
     id: row.id,
+    attemptId: row.attempt_id || null,
     student: row.student,
     initials: row.initials,
     assessment: row.assessment,
@@ -362,6 +440,20 @@ export function flagFromRow(row) {
     reviewNote: row.review_note,
     reviewedBy: row.reviewed_by,
     reviewedAt: row.reviewed_at,
+    createdAt: row.created_at || null,
+  }
+}
+
+export function securityEventFromRow(row) {
+  return {
+    id: row.id,
+    attemptId: row.attempt_id,
+    assessmentId: row.assessment_id,
+    menteeId: row.mentee_id,
+    eventType: row.event_type,
+    detail: row.detail,
+    clientTimestamp: row.client_timestamp || null,
+    serverTimestamp: row.server_timestamp,
   }
 }
 
@@ -389,6 +481,8 @@ export function assessmentFromRow(db, row) {
     navigationMode: row.navigation_mode || 'free',
     feedbackPolicy: row.feedback_policy || 'immediate',
     resultsReleased: Boolean(row.results_released),
+    securityMode: row.security_mode || 'standard',
+    requireFullscreen: Boolean(row.require_fullscreen),
     status: row.status,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
