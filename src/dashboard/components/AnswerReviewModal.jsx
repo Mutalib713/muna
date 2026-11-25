@@ -1,11 +1,6 @@
 import Icon from '../DashboardIcon'
 import StudentCell from './StudentCell'
-
-function formatDateTime(value) {
-  if (!value) return ''
-  const date = new Date(value)
-  return Number.isNaN(date.getTime()) ? value : date.toLocaleString()
-}
+import { formatDateTime } from '../format'
 
 export default function AnswerReviewModal({ answer, feedback, error, onFeedbackChange, onClose, onReview }) {
   return (

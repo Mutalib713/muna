@@ -1,9 +1,5 @@
 import StudentCell from './StudentCell'
-
-function formatDateTime(value) {
-  const date = new Date(value)
-  return Number.isNaN(date.getTime()) ? value : date.toLocaleString()
-}
+import { formatDateTime } from '../format'
 
 export default function AnswerTable({ answers, onSelect }) {
   return <div className="table-wrap"><table><thead><tr><th>STUDENT</th><th>ASSESSMENT</th><th>SUBMITTED</th><th>SCORE</th><th>STATUS</th><th></th></tr></thead><tbody>
