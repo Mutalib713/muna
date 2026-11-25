@@ -100,6 +100,12 @@ export function createDatabase(filename) {
       expires INTEGER NOT NULL
     );
     CREATE INDEX IF NOT EXISTS sessions_expires_idx ON sessions (expires);
+    CREATE TABLE IF NOT EXISTS admin_account (
+      id INTEGER PRIMARY KEY CHECK (id = 1),
+      name TEXT NOT NULL,
+      email TEXT NOT NULL UNIQUE,
+      password_hash TEXT NOT NULL
+    );
   `)
 
   const seed = db.transaction(() => {

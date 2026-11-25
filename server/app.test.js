@@ -1,17 +1,14 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import bcrypt from 'bcryptjs'
 import request from 'supertest'
 import { createApp } from './app.js'
 import { createDatabase } from './db.js'
 
 test('admin APIs require a session and persist questions, assessments, and review decisions', async () => {
   const db = createDatabase(':memory:')
-  const passwordHash = await bcrypt.hash('test-admin-password-2026', 4)
   const app = createApp({
     db,
-    adminEmail: 'admin@example.test',
-    passwordHash,
+    setupCode: 'test-setup-code',
     sessionSecret: 'test-session-secret-long-enough-for-tests',
   })
   const client = request.agent(app)
@@ -25,16 +22,50 @@ test('admin APIs require a session and persist questions, assessments, and revie
   assert.equal(csrfResponse.status, 200)
   const anonymousCsrf = csrfResponse.body.csrfToken
 
+  const setupStatus = await client.get('/api/auth/status')
+  assert.deepEqual(setupStatus.body, { setupRequired: true })
+
+  const wrongSetupCode = await client.post('/api/auth/setup')
+    .set('X-CSRF-Token', anonymousCsrf)
+    .send({ name: 'Test Admin', email: 'admin@example.test', password: 'test-admin-password-2026', confirmPassword: 'test-admin-password-2026', setupCode: 'wrong-code' })
+  assert.equal(wrongSetupCode.status, 403)
+
+  const shortPassword = await client.post('/api/auth/setup')
+    .set('X-CSRF-Token', anonymousCsrf)
+    .send({ name: 'Test Admin', email: 'admin@example.test', password: 'short', confirmPassword: 'short', setupCode: 'test-setup-code' })
+  assert.equal(shortPassword.status, 400)
+
+  const mismatchedPassword = await client.post('/api/auth/setup')
+    .set('X-CSRF-Token', anonymousCsrf)
+    .send({ name: 'Test Admin', email: 'admin@example.test', password: 'test-admin-password-2026', confirmPassword: 'a-different-password', setupCode: 'test-setup-code' })
+  assert.equal(mismatchedPassword.status, 400)
+
+  const setup = await client.post('/api/auth/setup')
+    .set('X-CSRF-Token', anonymousCsrf)
+    .send({ name: 'Test Admin', email: 'admin@example.test', password: 'test-admin-password-2026', confirmPassword: 'test-admin-password-2026', setupCode: 'test-setup-code' })
+  assert.equal(setup.status, 200)
+  assert.equal(setup.body.user.name, 'Test Admin')
+  assert.notEqual(db.prepare('SELECT password_hash FROM admin_account').get().password_hash, 'test-admin-password-2026')
+  assert.deepEqual((await client.get('/api/auth/status')).body, { setupRequired: false })
+
+  const setupAgain = await client.post('/api/auth/setup')
+    .set('X-CSRF-Token', setup.body.csrfToken)
+    .send({})
+  assert.equal(setupAgain.status, 403)
+
+  await client.post('/api/auth/logout').set('X-CSRF-Token', setup.body.csrfToken)
+  const loginCsrf = (await client.get('/api/auth/csrf')).body.csrfToken
+
   const csrfRejected = await client.post('/api/auth/login').send({ email: 'admin@example.test', password: 'test-admin-password-2026' })
   assert.equal(csrfRejected.status, 403)
 
   const badLogin = await client.post('/api/auth/login')
-    .set('X-CSRF-Token', anonymousCsrf)
+    .set('X-CSRF-Token', loginCsrf)
     .send({ email: 'wrong@example.test', password: 'test-admin-password-2026' })
   assert.equal(badLogin.status, 401)
 
   const login = await client.post('/api/auth/login')
-    .set('X-CSRF-Token', anonymousCsrf)
+    .set('X-CSRF-Token', loginCsrf)
     .send({ email: 'admin@example.test', password: 'test-admin-password-2026' })
   assert.equal(login.status, 200)
   assert.equal(login.body.user.role, 'admin')
@@ -138,5 +169,29 @@ test('admin APIs require a session and persist questions, assessments, and revie
   const afterLogout = await client.get('/api/questions')
   assert.equal(afterLogout.status, 401)
 
+  db.close()
+})
+
+test('only one concurrent setup request can create the admin account', async () => {
+  const db = createDatabase(':memory:')
+  const app = createApp({
+    db,
+    setupCode: 'test-setup-code',
+    sessionSecret: 'test-session-secret-long-enough-for-tests',
+  })
+  const clients = [request.agent(app), request.agent(app)]
+  const tokens = await Promise.all(clients.map(async (client) => (await client.get('/api/auth/csrf')).body.csrfToken))
+  const responses = await Promise.all(clients.map((client, index) => client.post('/api/auth/setup')
+    .set('X-CSRF-Token', tokens[index])
+    .send({
+      name: `Test Admin ${index}`,
+      email: `admin${index}@example.test`,
+      password: 'test-admin-password-2026',
+      confirmPassword: 'test-admin-password-2026',
+      setupCode: 'test-setup-code',
+    })))
+
+  assert.deepEqual(responses.map((response) => response.status).sort(), [200, 403])
+  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM admin_account').get().count, 1)
   db.close()
 })
