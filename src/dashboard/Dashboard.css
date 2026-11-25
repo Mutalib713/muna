@@ -1,5 +1,9 @@
-@import './styles/shell-overview.css';
-@import './styles/questions-modals-base.css';
-@import './styles/members-help-auth.css';
+@import './styles/shell-layout.css';
+@import './styles/overview-dashboard.css';
+@import './styles/tables-status.css';
+@import './styles/questions-signals.css';
+@import './styles/modals-responsive.css';
+@import './styles/members-invitations.css';
+@import './styles/help-auth-reviews.css';
 @import './styles/rich-questions.css';
 @import './styles/learner-reports-org.css';

@@ -1,32 +1,12 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useState } from 'react'
 import { getInvitationState } from '../dashboardData'
 import { draftToPayload, newQuestionDraft, questionToDraft } from '../questionTypes'
 import { downloadQuestionTemplate, parseQuestionFile } from '../questionImport'
-import apiRequest, {
-  cacheCsrfToken,
-  clearCsrfTokenCache,
-  loadDashboardData,
-  loadResourcePage,
-  requestCsrfToken,
-  setActiveOrganisationId,
-} from '../services/adminApi'
+import apiRequest, { loadResourcePage } from '../services/adminApi'
+import { useWorkspaceAuth } from './useWorkspaceAuth'
 
 /** Manage workspace session, active organisation context, and dashboard CRUD operations. */
 export function useDashboardWorkspace(orgSlug = '') {
-  const [authStatus, setAuthStatus] = useState('checking')
-  const [admin, setAdmin] = useState(null)
-  const [organisations, setOrganisations] = useState([])
-  const [activeOrg, setActiveOrg] = useState(null)
-  const [devVerifyToken, setDevVerifyToken] = useState('')
-  const [csrfToken, setCsrfToken] = useState('')
-  const [loginEmail, setLoginEmail] = useState('')
-  const [loginPassword, setLoginPassword] = useState('')
-  const [loginError, setLoginError] = useState('')
-  const [loginLoading, setLoginLoading] = useState(false)
-  const [setupForm, setSetupForm] = useState({ name: '', email: '', password: '', confirmPassword: '', setupCode: '' })
-  const [setupError, setSetupError] = useState('')
-  const [setupLoading, setSetupLoading] = useState(false)
-  const [apiError, setApiError] = useState('')
   const [summary, setSummary] = useState({ totalStudents: 0, totalQuestions: 0, weeklyActivity: [] })
   const [mentees, setMentees] = useState([])
   const [assessments, setAssessments] = useState([])
@@ -48,7 +28,7 @@ export function useDashboardWorkspace(orgSlug = '') {
   const [flagReviewNote, setFlagReviewNote] = useState('')
   const [flagReviewError, setFlagReviewError] = useState('')
 
-  function applyDashboardData(data) {
+  const applyDashboardData = useCallback((data) => {
     setQuestions(data.questions)
     setAnswers(data.answers)
     setFlags(data.flags)
@@ -58,13 +38,9 @@ export function useDashboardWorkspace(orgSlug = '') {
     setMembers(data.members)
     setInvitations(data.invitations)
     setPagination(data.pagination || {})
-  }
+  }, [])
 
-  function clearWorkspaceState() {
-    setAdmin(null)
-    setOrganisations([])
-    setActiveOrg(null)
-    setActiveOrganisationId('')
+  const clearDomainState = useCallback(() => {
     setQuestions([])
     setAnswers([])
     setFlags([])
@@ -74,219 +50,10 @@ export function useDashboardWorkspace(orgSlug = '') {
     setInvitations([])
     setPagination({})
     setSummary({ totalStudents: 0, totalQuestions: 0, weeklyActivity: [] })
-  }
+  }, [])
 
-  function handleApiError(error) {
-    if (error.status === 401) {
-      clearWorkspaceState()
-      setAuthStatus('unauthenticated')
-      clearCsrfTokenCache()
-      requestCsrfToken()
-        .then(({ csrfToken: token }) => setCsrfToken(token))
-        .catch((refreshError) => setApiError(refreshError.message))
-    } else if (error.payload?.emailVerificationRequired) {
-      setAuthStatus('verification-required')
-    }
-    setApiError(error.message)
-  }
-
-  async function withAuth(task) {
-    try {
-      return await task()
-    } catch (error) {
-      if (error.status === 401 || error.payload?.emailVerificationRequired) handleApiError(error)
-      throw error
-    }
-  }
-
-  useEffect(() => {
-    let active = true
-    async function initialize() {
-      try {
-        const [{ csrfToken: token }, { setupRequired }] = await Promise.all([
-          requestCsrfToken(),
-          apiRequest('/auth/status'),
-        ])
-        if (!active) return
-        setCsrfToken(token)
-        if (setupRequired && !orgSlug) {
-          setAuthStatus('setup-required')
-          return
-        }
-        try {
-          const me = await apiRequest('/auth/me')
-          if (!active) return
-          const user = me.user
-          const orgList = me.organisations || []
-          setAdmin(user)
-          setOrganisations(orgList)
-          if (!user.emailVerified) {
-            setAuthStatus('verification-required')
-            return
-          }
-          const matchedOrg = orgSlug
-            ? orgList.find((org) => org.slug === orgSlug)
-            : (me.organisation || orgList.find((org) => ['Owner', 'Admin', 'Mentor'].includes(org.role)) || orgList[0])
-          if (!matchedOrg) {
-            setApiError('You do not have access to this organisation.')
-            setAuthStatus('unauthenticated')
-            return
-          }
-          if (!['Owner', 'Admin', 'Mentor'].includes(matchedOrg.role)) {
-            if (matchedOrg.menteeId) {
-              window.location.assign(`/#/learner/${encodeURIComponent(matchedOrg.menteeId)}`)
-              return
-            }
-            setApiError('This workspace requires an Owner, Admin, or Mentor role.')
-            setAuthStatus('unauthenticated')
-            return
-          }
-          setActiveOrg(matchedOrg)
-          setActiveOrganisationId(matchedOrg.id)
-          const data = await loadDashboardData()
-          if (!active) return
-          applyDashboardData(data)
-          setAuthStatus('authenticated')
-        } catch (error) {
-          if (error.status === 401) {
-            setAuthStatus('unauthenticated')
-            return
-          }
-          if (error.payload?.emailVerificationRequired) {
-            setAuthStatus('verification-required')
-            return
-          }
-          throw error
-        }
-      } catch (error) {
-        if (active) {
-          setApiError(error.message)
-          setAuthStatus('unauthenticated')
-        }
-      }
-    }
-    initialize()
-    return () => { active = false }
-  }, [orgSlug])
-
-  async function selectOrganisation(nextOrgId) {
-    setApiError('')
-    const { organisation, organisations: nextOrgs } = await apiRequest('/organisations/switch', {
-      method: 'POST',
-      body: { organisationId: nextOrgId },
-      csrfToken,
-    })
-    setOrganisations(nextOrgs)
-    setActiveOrg(organisation)
-    setActiveOrganisationId(organisation.id)
-    if (orgSlug) window.history.pushState({}, '', `/o/${encodeURIComponent(organisation.slug)}`)
-    applyDashboardData(await loadDashboardData())
-  }
-
-  async function createOrganisation(name) {
-    const { organisation } = await apiRequest('/organisations', { method: 'POST', body: { name }, csrfToken })
-    const { organisations: nextOrgs } = await apiRequest('/organisations')
-    setOrganisations(nextOrgs)
-    setActiveOrg(organisation)
-    setActiveOrganisationId(organisation.id)
-    if (orgSlug) window.history.pushState({}, '', `/o/${encodeURIComponent(organisation.slug)}`)
-    applyDashboardData(await loadDashboardData())
-  }
-
-  async function handleResendVerification() {
-    setApiError('')
-    try {
-      const data = await apiRequest('/auth/resend-verification', { method: 'POST', csrfToken })
-      if (data.verificationToken) setDevVerifyToken(data.verificationToken)
-      setApiError('Verification email re-issued. Verify your email before opening the workspace.')
-    } catch (error) {
-      setApiError(error.message)
-    }
-  }
-
-  async function handleLogin(event) {
-    event.preventDefault()
-    setLoginLoading(true)
-    setLoginError('')
-    setApiError('')
-    try {
-      const { user, organisation, organisations: orgList = [], csrfToken: token } = await apiRequest('/auth/login', {
-        method: 'POST',
-        body: { email: loginEmail, password: loginPassword },
-        csrfToken,
-      })
-      cacheCsrfToken(token)
-      setCsrfToken(token)
-      setAdmin(user)
-      setOrganisations(orgList)
-      setLoginPassword('')
-      if (!user.emailVerified) {
-        setAuthStatus('verification-required')
-        return
-      }
-      const targetOrg = orgSlug ? orgList.find((org) => org.slug === orgSlug) : (organisation || orgList[0])
-      if (!targetOrg) {
-        setLoginError('You do not have access to this organisation.')
-        return
-      }
-      if (!['Owner', 'Admin', 'Mentor'].includes(targetOrg.role)) {
-        if (targetOrg.menteeId) {
-          window.location.assign(`/#/learner/${encodeURIComponent(targetOrg.menteeId)}`)
-          return
-        }
-        setLoginError('Workspace access requires an Owner, Admin, or Mentor role.')
-        return
-      }
-      setActiveOrg(targetOrg)
-      setActiveOrganisationId(targetOrg.id)
-      applyDashboardData(await loadDashboardData())
-      setAuthStatus('authenticated')
-    } catch (error) {
-      setLoginError(error.message)
-    } finally {
-      setLoginLoading(false)
-    }
-  }
-
-  async function handleSetup(event) {
-    event.preventDefault()
-    setSetupLoading(true)
-    setSetupError('')
-    setApiError('')
-    try {
-      const { user, organisation, organisations: orgList = [], csrfToken: token } = await apiRequest('/auth/setup', {
-        method: 'POST',
-        body: setupForm,
-        csrfToken,
-      })
-      cacheCsrfToken(token)
-      setCsrfToken(token)
-      setAdmin(user)
-      setOrganisations(orgList)
-      setActiveOrg(organisation)
-      if (organisation?.id) setActiveOrganisationId(organisation.id)
-      applyDashboardData(await loadDashboardData())
-      setSetupForm({ name: '', email: '', password: '', confirmPassword: '', setupCode: '' })
-      setAuthStatus('authenticated')
-    } catch (error) {
-      setSetupError(error.message)
-    } finally {
-      setSetupLoading(false)
-    }
-  }
-
-  async function handleLogout() {
-    try {
-      await apiRequest('/auth/logout', { method: 'POST', csrfToken })
-      clearWorkspaceState()
-      setAuthStatus('unauthenticated')
-      clearCsrfTokenCache()
-      const { csrfToken: token } = await requestCsrfToken()
-      setCsrfToken(token)
-    } catch (error) {
-      handleApiError(error)
-    }
-  }
+  const auth = useWorkspaceAuth(orgSlug, { applyDashboardData, clearDomainState })
+  const { csrfToken, handleApiError, withAuth } = auth
 
   async function handleQuestionUpload(event) {
     const file = event.target.files && event.target.files[0]
@@ -485,24 +252,24 @@ export function useDashboardWorkspace(orgSlug = '') {
   }
 
   return {
-    authStatus,
-    admin,
-    organisations,
-    activeOrg,
-    devVerifyToken,
-    loginEmail,
-    setLoginEmail,
-    loginPassword,
-    setLoginPassword,
-    loginError,
-    loginLoading,
-    setupForm,
-    setSetupForm,
-    setSetupError,
-    setupError,
-    setupLoading,
-    apiError,
-    setApiError,
+    authStatus: auth.authStatus,
+    admin: auth.admin,
+    organisations: auth.organisations,
+    activeOrg: auth.activeOrg,
+    devVerifyToken: auth.devVerifyToken,
+    loginEmail: auth.loginEmail,
+    setLoginEmail: auth.setLoginEmail,
+    loginPassword: auth.loginPassword,
+    setLoginPassword: auth.setLoginPassword,
+    loginError: auth.loginError,
+    loginLoading: auth.loginLoading,
+    setupForm: auth.setupForm,
+    setSetupForm: auth.setSetupForm,
+    setSetupError: auth.setSetupError,
+    setupError: auth.setupError,
+    setupLoading: auth.setupLoading,
+    apiError: auth.apiError,
+    setApiError: auth.setApiError,
     questions,
     answers,
     flags,
@@ -535,12 +302,12 @@ export function useDashboardWorkspace(orgSlug = '') {
     setFlagReviewNote,
     flagReviewError,
     setFlagReviewError,
-    handleLogin,
-    handleSetup,
-    handleLogout,
-    handleResendVerification,
-    selectOrganisation,
-    createOrganisation,
+    handleLogin: auth.handleLogin,
+    handleSetup: auth.handleSetup,
+    handleLogout: auth.handleLogout,
+    handleResendVerification: auth.handleResendVerification,
+    selectOrganisation: auth.selectOrganisation,
+    createOrganisation: auth.createOrganisation,
     goToPage,
     downloadTemplate: downloadQuestionTemplate,
     handleQuestionUpload,
