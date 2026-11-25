@@ -295,3 +295,164 @@ test('members and invitations persist, validate hashed tokens, and handle accept
 
   db.close()
 })
+
+test('rich question types, rubrics, vector drawings, and manual grading work end-to-end', async () => {
+  const db = createDatabase(':memory:')
+  const passwordHash = await bcrypt.hash('test-admin-password-2026', 4)
+  const app = createApp({
+    db,
+    adminEmail: 'mentor@example.test',
+    adminName: 'Mentor Lead',
+    passwordHash,
+    sessionSecret: 'test-session-secret-long-enough-for-tests',
+  })
+  const client = request.agent(app)
+  const csrf = (await client.get('/api/auth/csrf')).body.csrfToken
+  const login = await client.post('/api/auth/login')
+    .set('X-CSRF-Token', csrf)
+    .send({ email: 'mentor@example.test', password: 'test-admin-password-2026' })
+  assert.equal(login.status, 200)
+  const adminCsrf = login.body.csrfToken
+
+  // Create multi-select (partial credit), true/false, short answer (auto), theory (rubric), and drawing (rubric)
+  const msRes = await client.post('/api/questions').set('X-CSRF-Token', adminCsrf).send({
+    type: 'multi_select',
+    prompt: 'Select prime numbers.',
+    options: ['2', '3', '4', '5'],
+    correctAnswers: ['2', '3', '5'],
+    partialCredit: true,
+    points: 3,
+    difficulty: 'Easy',
+    tags: ['math'],
+  })
+  assert.equal(msRes.status, 201)
+  const msId = msRes.body.question.id
+
+  const tfRes = await client.post('/api/questions').set('X-CSRF-Token', adminCsrf).send({
+    type: 'true_false',
+    prompt: 'SEB is a desktop kiosk browser.',
+    correctAnswer: 'True',
+    points: 2,
+  })
+  assert.equal(tfRes.status, 201)
+  const tfId = tfRes.body.question.id
+
+  const saRes = await client.post('/api/questions').set('X-CSRF-Token', adminCsrf).send({
+    type: 'short_answer',
+    prompt: 'Abbreviation for Safe Exam Browser?',
+    acceptedAnswers: ['SEB', 'Safe Exam Browser'],
+    points: 2,
+  })
+  assert.equal(saRes.status, 201)
+  const saId = saRes.body.question.id
+
+  const theoryRes = await client.post('/api/questions').set('X-CSRF-Token', adminCsrf).send({
+    type: 'theory',
+    prompt: 'Explain server-side grading.',
+    points: 5,
+    rubric: [{ criterion: 'Boundary', points: 5, description: 'Covers client untrustworthiness.' }],
+  })
+  assert.equal(theoryRes.status, 201)
+  const theoryId = theoryRes.body.question.id
+
+  const drawRes = await client.post('/api/questions').set('X-CSRF-Token', adminCsrf).send({
+    type: 'drawing',
+    prompt: 'Draw the attempt state diagram.',
+    points: 4,
+    rubric: [{ criterion: 'States', points: 4, description: 'Active and Submitted states.' }],
+  })
+  assert.equal(drawRes.status, 201)
+  const drawId = drawRes.body.question.id
+
+  // Build and publish assessment with all 5 rich questions (max points = 16)
+  const menteeRes = await client.post('/api/mentees').set('X-CSRF-Token', adminCsrf).send({
+    name: 'Kofi Mensah',
+    email: 'kofi@example.test',
+  })
+  const menteeId = menteeRes.body.mentee.id
+
+  const assessmentRes = await client.post('/api/assessments').set('X-CSRF-Token', adminCsrf).send({
+    title: 'Mixed Interactive Exam',
+    questionIds: [msId, tfId, saId, theoryId, drawId],
+    menteeIds: [menteeId],
+  })
+  assert.equal(assessmentRes.status, 201)
+  const assessmentId = assessmentRes.body.assessment.id
+
+  await client.patch(`/api/assessments/${assessmentId}/status`).set('X-CSRF-Token', adminCsrf).send({ status: 'Published' })
+
+  // Learner view strips answer keys
+  const learnerFetch = await client.get(`/api/learner/assessments/${menteeId}`)
+  assert.equal(learnerFetch.status, 200)
+  const loadedQuestions = learnerFetch.body.assessments[0].questions
+  assert.equal(loadedQuestions.length, 5)
+  loadedQuestions.forEach((q) => {
+    assert.equal(q.correctAnswer, undefined)
+    assert.equal(q.correctAnswers, undefined)
+    assert.equal(q.acceptedAnswers, undefined)
+  })
+
+  // Empty drawing without strokes or altText is rejected
+  const invalidSubmit = await client.post(`/api/learner/assessments/${assessmentId}/attempts`).send({
+    menteeId,
+    answers: {
+      [msId]: ['2', '3'],
+      [tfId]: 'True',
+      [saId]: 'seb',
+      [theoryId]: 'Client code can be inspected.',
+      [drawId]: { strokes: [], altText: '' },
+    },
+  })
+  assert.equal(invalidSubmit.status, 400)
+
+  // Valid mixed submission: multi_select gets 2/3 pts, tf gets 2/2, sa gets 2/2 -> auto = 6 / 16
+  const validSubmit = await client.post(`/api/learner/assessments/${assessmentId}/attempts`).send({
+    menteeId,
+    answers: {
+      [msId]: ['2', '3'],
+      [tfId]: 'True',
+      [saId]: 'seb',
+      [theoryId]: 'Client code is untrusted so grading runs on the server.',
+      [drawId]: {
+        strokes: [{ color: '#0F5C8C', width: 2, erase: false, points: [{ x: 0.1, y: 0.2 }, { x: 0.8, y: 0.7 }] }],
+        altText: 'Active transitions to Submitted.',
+      },
+    },
+  })
+  assert.equal(validSubmit.status, 201)
+  assert.equal(validSubmit.body.attempt.earnedPoints, 6)
+  assert.equal(validSubmit.body.attempt.maxPoints, 16)
+  assert.equal(validSubmit.body.attempt.needsManualGrading, true)
+
+  // Mentor grades manual theory (4/5) + drawing (3/4) -> total becomes 13 / 16
+  const answersRes = await client.get('/api/answers')
+  const submitted = answersRes.body.answers.find((a) => a.attemptId === validSubmit.body.attempt.id)
+  assert.ok(submitted)
+  assert.equal(submitted.items.length, 5)
+
+  const invalidGrade = await client.patch(`/api/answers/${submitted.id}/review`)
+    .set('X-CSRF-Token', adminCsrf)
+    .send({
+      decision: 'Approved',
+      feedback: 'Good work',
+      itemGrades: [{ questionId: theoryId, earnedPoints: 99 }],
+    })
+  assert.equal(invalidGrade.status, 400)
+
+  const graded = await client.patch(`/api/answers/${submitted.id}/review`)
+    .set('X-CSRF-Token', adminCsrf)
+    .send({
+      decision: 'Approved',
+      feedback: 'Clear reasoning and diagram.',
+      itemGrades: [
+        { questionId: theoryId, earnedPoints: 4, comment: 'Good boundary explanation.' },
+        { questionId: drawId, earnedPoints: 3, comment: 'Add Terminated state next time.' },
+      ],
+    })
+  assert.equal(graded.status, 200)
+  assert.equal(graded.body.answer.score, '13 / 16')
+  assert.equal(graded.body.answer.earnedPoints, 13)
+  assert.equal(graded.body.answer.items.find((i) => i.questionId === drawId).comment, 'Add Terminated state next time.')
+
+  db.close()
+})

@@ -1,4 +1,5 @@
 import { useMemo, useState } from 'react'
+import { QUESTION_TYPE_LABELS } from '../questionTypes'
 import './Assessments.css'
 
 const statusClass = {
@@ -209,7 +210,7 @@ export default function Assessments({ dashboard }) {
             <label className="form-label">Maximum attempts per mentee<select value={form.maxAttempts} onChange={(event) => setForm({ ...form, maxAttempts: event.target.value })}><option value="3">3 attempts — default</option><option value="2">2 attempts</option><option value="1">1 attempt</option></select></label>
             <fieldset className="assessment-choice-group">
               <legend>Choose questions <span>{form.questionIds.length} selected</span></legend>
-              {questions.length ? questions.map((question) => <label className={`assessment-choice ${form.questionIds.includes(question.id) ? 'assessment-choice-selected' : ''}`} key={question.id}><input type="checkbox" checked={form.questionIds.includes(question.id)} onChange={() => toggleSelection('questionIds', question.id)} /><span><strong>{question.prompt}</strong><small>{question.id} · {question.options.length} options</small></span></label>) : <p className="assessment-choice-empty">Add questions to the question bank before creating an assessment.</p>}
+              {questions.length ? questions.map((question) => <label className={`assessment-choice ${form.questionIds.includes(question.id) ? 'assessment-choice-selected' : ''}`} key={question.id}><input type="checkbox" checked={form.questionIds.includes(question.id)} onChange={() => toggleSelection('questionIds', question.id)} /><span><strong>{question.prompt}</strong><small>{question.id} · {QUESTION_TYPE_LABELS[question.type || 'mcq']} · {question.points ?? 1} pts</small></span></label>) : <p className="assessment-choice-empty">Add questions to the question bank before creating an assessment.</p>}
             </fieldset>
             <fieldset className="assessment-choice-group">
               <legend>Assign to mentees <span>{form.menteeIds.length} selected</span></legend>

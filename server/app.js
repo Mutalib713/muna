@@ -19,6 +19,13 @@ import {
   menteeFromRow,
   questionFromRow,
 } from './db.js'
+import {
+  formatPoints,
+  gradeQuestionResponse,
+  normalizeQuestionInput,
+  sanitizeQuestionForLearner,
+  validateQuestion,
+} from './question-utils.js'
 import { SQLiteSessionStore } from './sqlite-session-store.js'
 
 const SESSION_TTL_MS = 8 * 60 * 60 * 1000
@@ -55,23 +62,6 @@ function requireAdmin(req, res, next) {
     return
   }
   next()
-}
-
-function validateQuestion(input) {
-  if (!input || typeof input !== 'object' || Array.isArray(input)) return 'Each question must be an object.'
-  const prompt = typeof input.prompt === 'string' ? input.prompt.trim() : ''
-  if (!prompt || prompt.length > 5000) return 'Question text must be between 1 and 5000 characters.'
-  if (!Array.isArray(input.options) || input.options.length < 2 || input.options.length > 8) {
-    return 'Each question must have between 2 and 8 answer options.'
-  }
-  const options = input.options.map((option) => typeof option === 'string' ? option.trim() : option)
-  if (options.some((option) => typeof option !== 'string' || !option || option.length > 1000)) {
-    return 'Answer options must contain between 1 and 1000 characters.'
-  }
-  if (typeof input.correctAnswer !== 'string' || !options.includes(input.correctAnswer.trim())) {
-    return 'The correct answer must match one of the question options.'
-  }
-  return null
 }
 
 function validateAssessment(input) {
@@ -164,19 +154,30 @@ function pagination(req, defaultLimit = 25) {
 }
 
 function addQuestion(db, input) {
-  const question = {
-    id: `Q-${randomUUID().slice(0, 8).toUpperCase()}`,
-    prompt: input.prompt.trim(),
-    options: input.options.map((option) => option.trim()),
-    correctAnswer: input.correctAnswer.trim(),
-    status: 'Published',
-    createdAt: new Date().toISOString(),
-  }
+  const id = `Q-${randomUUID().slice(0, 8).toUpperCase()}`
+  const createdAt = new Date().toISOString()
+  const normalized = normalizeQuestionInput(input)
   db.prepare(`
-    INSERT INTO questions (id, prompt, options_json, correct_answer, status, created_at)
-    VALUES (?, ?, ?, ?, ?, ?)
-  `).run(question.id, question.prompt, JSON.stringify(question.options), question.correctAnswer, question.status, question.createdAt)
-  return question
+    INSERT INTO questions (
+      id, type, prompt, options_json, correct_answer,
+      points, difficulty, tags_json, config_json, rubric_json,
+      status, created_at
+    )
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Published', ?)
+  `).run(
+    id,
+    normalized.type,
+    normalized.prompt,
+    JSON.stringify(normalized.options),
+    normalized.correctAnswer,
+    normalized.points,
+    normalized.difficulty,
+    JSON.stringify(normalized.tags),
+    JSON.stringify(normalized.config),
+    JSON.stringify(normalized.rubric),
+    createdAt,
+  )
+  return questionFromRow(db.prepare('SELECT * FROM questions WHERE id = ?').get(id))
 }
 
 function getReviewHistory(db, entityType, entityId) {
@@ -236,7 +237,7 @@ export function createApp({
     } : false,
     strictTransportSecurity: production ? undefined : false,
   }))
-  app.use(express.json({ limit: '100kb' }))
+  app.use(express.json({ limit: '512kb' }))
   app.use(session({
     name: 'muna.sid',
     secret: sessionSecret,
@@ -525,10 +526,7 @@ export function createApp({
         `).all(row.id).map((item) => item.question_id)
         const questions = questionIds.map((id) => {
           const question = db.prepare('SELECT * FROM questions WHERE id = ?').get(id)
-          const publicQuestion = questionFromRow(question)
-          delete publicQuestion.correctAnswer
-          delete publicQuestion.status
-          return publicQuestion
+          return sanitizeQuestionForLearner(questionFromRow(question))
         })
         const attemptCount = db.prepare(`
           SELECT COUNT(*) AS count FROM assessment_attempts
@@ -584,37 +582,73 @@ export function createApp({
       JOIN questions q ON q.id = aq.question_id
       WHERE aq.assessment_id = ? ORDER BY aq.position
     `).all(req.params.id)
-    let correctCount = 0
-    const answerDetails = questionRows.map((question) => {
-      const publicAnswer = typeof submittedAnswers[question.id] === 'string' ? submittedAnswers[question.id].trim() : ''
-      if (publicAnswer === question.correct_answer) correctCount++
-      return { questionId: question.id, answer: publicAnswer }
-    })
-    if (answerDetails.some((item) => !item.answer)) {
-      res.status(400).json({ error: 'Answer every question before submitting.' })
-      return
+    const gradedItems = []
+    for (const row of questionRows) {
+      const question = questionFromRow(row)
+      const graded = gradeQuestionResponse(question, submittedAnswers[question.id])
+      if (graded.error) {
+        res.status(400).json({ error: graded.error })
+        return
+      }
+      gradedItems.push(graded)
     }
-    const score = `${correctCount} / ${questionRows.length}`
+    const earnedPoints = Math.round(gradedItems.reduce((sum, item) => sum + item.earnedPoints, 0) * 100) / 100
+    const maxPoints = Math.round(gradedItems.reduce((sum, item) => sum + item.maxPoints, 0) * 100) / 100
+    const needsManualGrading = gradedItems.some((item) => item.needsReview)
+    const gradingStatus = needsManualGrading ? 'Needs manual grading' : 'Graded'
+    const score = `${formatPoints(earnedPoints)} / ${formatPoints(maxPoints)}`
     const now = new Date().toISOString()
     const attemptId = `AT-${randomUUID().slice(0, 8).toUpperCase()}`
     const answerId = `A-${randomUUID().slice(0, 8).toUpperCase()}`
-    const answerSummary = answerDetails.map((item) => {
-      const question = questionRows.find((row) => row.id === item.questionId)
-      return `${question.prompt}: ${item.answer}`
-    }).join('\n')
+    const answerSummary = gradedItems.map((item) => `${item.prompt}: ${item.summaryText}`).join('\n')
+    const storedAnswers = gradedItems.map((item) => ({
+      questionId: item.questionId,
+      type: item.type,
+      response: item.response,
+      earnedPoints: item.earnedPoints,
+      maxPoints: item.maxPoints,
+      needsReview: item.needsReview,
+    }))
     const submitAttempt = db.transaction(() => {
       db.prepare(`
-        INSERT INTO assessment_attempts (id, assessment_id, mentee_id, answers_json, score, submitted_at)
-        VALUES (?, ?, ?, ?, ?, ?)
-      `).run(attemptId, req.params.id, menteeId, JSON.stringify(answerDetails), score, now)
+        INSERT INTO assessment_attempts (
+          id, assessment_id, mentee_id, answers_json, score, grading_status, earned_points, max_points, submitted_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(attemptId, req.params.id, menteeId, JSON.stringify(storedAnswers), score, gradingStatus, earnedPoints, maxPoints, now)
       db.prepare(`
-        INSERT INTO answers (id, student, initials, assessment, answer, score, submitted_at, status)
-        VALUES (?, ?, ?, ?, ?, ?, ?, 'Needs review')
-      `).run(answerId, mentee.name, initialsFor(mentee.name), assessment.title, answerSummary, score, now)
+        INSERT INTO answers (
+          id, attempt_id, student, initials, assessment, answer, score,
+          earned_points, max_points, items_json, submitted_at, status
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Needs review')
+      `).run(
+        answerId,
+        attemptId,
+        mentee.name,
+        initialsFor(mentee.name),
+        assessment.title,
+        answerSummary,
+        score,
+        earnedPoints,
+        maxPoints,
+        JSON.stringify(gradedItems),
+        now,
+      )
     })
     submitAttempt()
     res.status(201).json({
-      attempt: { id: attemptId, score, submittedAt: now, attemptCount: attemptCount + 1, maxAttempts: assessment.max_attempts },
+      attempt: {
+        id: attemptId,
+        score,
+        earnedPoints,
+        maxPoints,
+        gradingStatus,
+        needsManualGrading,
+        submittedAt: now,
+        attemptCount: attemptCount + 1,
+        maxAttempts: assessment.max_attempts,
+      },
     })
   })
 
@@ -666,11 +700,25 @@ export function createApp({
       res.status(404).json({ error: 'Question not found.' })
       return
     }
+    const normalized = normalizeQuestionInput(req.body)
     db.prepare(`
       UPDATE questions
-      SET prompt = ?, options_json = ?, correct_answer = ?, status = 'Published'
+      SET type = ?, prompt = ?, options_json = ?, correct_answer = ?,
+          points = ?, difficulty = ?, tags_json = ?, config_json = ?, rubric_json = ?,
+          status = 'Published'
       WHERE id = ?
-    `).run(req.body.prompt.trim(), JSON.stringify(req.body.options.map((option) => option.trim())), req.body.correctAnswer.trim(), req.params.id)
+    `).run(
+      normalized.type,
+      normalized.prompt,
+      JSON.stringify(normalized.options),
+      normalized.correctAnswer,
+      normalized.points,
+      normalized.difficulty,
+      JSON.stringify(normalized.tags),
+      JSON.stringify(normalized.config),
+      JSON.stringify(normalized.rubric),
+      req.params.id,
+    )
     const row = db.prepare('SELECT * FROM questions WHERE id = ?').get(req.params.id)
     res.json({ question: questionFromRow(row) })
   })
@@ -902,7 +950,7 @@ export function createApp({
   })
 
   router.patch('/answers/:id/review', verifyCsrf, (req, res) => {
-    const { decision, feedback } = req.body || {}
+    const { decision, feedback, itemGrades } = req.body || {}
     if (!['Approved', 'Revision requested'].includes(decision)) {
       res.status(400).json({ error: 'Choose Approved or Revision requested.' })
       return
@@ -911,18 +959,83 @@ export function createApp({
       res.status(400).json({ error: 'Feedback is required for a revision request and must be 5000 characters or fewer.' })
       return
     }
-    const existing = db.prepare('SELECT id FROM answers WHERE id = ?').get(req.params.id)
+    const existing = db.prepare('SELECT * FROM answers WHERE id = ?').get(req.params.id)
     if (!existing) {
       res.status(404).json({ error: 'Submission not found.' })
       return
     }
+
+    let existingItems = []
+    try {
+      existingItems = JSON.parse(existing.items_json || '[]')
+    } catch {
+      existingItems = []
+    }
+    let nextScore = existing.score
+    let nextEarned = existing.earned_points
+    let nextMax = existing.max_points
+
+    if (Array.isArray(itemGrades) && existingItems.length > 0) {
+      const gradeMap = new Map()
+      for (const grade of itemGrades) {
+        if (!grade || typeof grade.questionId !== 'string') {
+          res.status(400).json({ error: 'Each item grade must identify a question.' })
+          return
+        }
+        gradeMap.set(grade.questionId, grade)
+      }
+      const updatedItems = []
+      for (const item of existingItems) {
+        const update = gradeMap.get(item.questionId)
+        if (!update) {
+          updatedItems.push(item)
+          continue
+        }
+        const maxPoints = Number(item.maxPoints ?? 1)
+        const earned = Number(update.earnedPoints)
+        if (!Number.isFinite(earned) || earned < 0 || earned > maxPoints) {
+          res.status(400).json({ error: `Score for "${item.prompt}" must be between 0 and ${maxPoints}.` })
+          return
+        }
+        const comment = typeof update.comment === 'string' ? update.comment.trim().slice(0, 2000) : (item.comment || '')
+        updatedItems.push({
+          ...item,
+          earnedPoints: Math.round(earned * 100) / 100,
+          comment,
+          needsReview: false,
+        })
+      }
+      existingItems = updatedItems
+      nextEarned = Math.round(existingItems.reduce((sum, item) => sum + Number(item.earnedPoints || 0), 0) * 100) / 100
+      nextMax = Math.round(existingItems.reduce((sum, item) => sum + Number(item.maxPoints || 0), 0) * 100) / 100
+      nextScore = `${formatPoints(nextEarned)} / ${formatPoints(nextMax)}`
+    }
+
     const reviewedAt = new Date().toISOString()
     const updateReview = db.transaction(() => {
       db.prepare(`
         UPDATE answers
-        SET status = 'Reviewed', review_decision = ?, feedback = ?, reviewed_by = ?, reviewed_at = ?
+        SET status = 'Reviewed', review_decision = ?, feedback = ?, reviewed_by = ?, reviewed_at = ?,
+            items_json = ?, score = ?, earned_points = ?, max_points = ?
         WHERE id = ?
-      `).run(decision, feedback.trim(), req.session.admin.name, reviewedAt, req.params.id)
+      `).run(
+        decision,
+        feedback.trim(),
+        req.session.admin.name,
+        reviewedAt,
+        JSON.stringify(existingItems),
+        nextScore,
+        nextEarned,
+        nextMax,
+        req.params.id,
+      )
+      if (existing.attempt_id) {
+        db.prepare(`
+          UPDATE assessment_attempts
+          SET score = ?, grading_status = 'Graded', earned_points = ?, max_points = ?
+          WHERE id = ?
+        `).run(nextScore, nextEarned ?? 0, nextMax ?? 0, existing.attempt_id)
+      }
       db.prepare(`
         INSERT INTO review_history (entity_type, entity_id, actor, decision, note, created_at)
         VALUES ('answer', ?, ?, ?, ?, ?)

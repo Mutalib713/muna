@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { getInvitationState } from './dashboardData'
+import { draftToPayload, newQuestionDraft, questionToDraft } from './questionTypes'
 import { dashboardViews } from './views/registry'
 import Icon from './DashboardIcon'
 import AdminLoginScreen from './components/AdminLoginScreen'
@@ -46,7 +47,7 @@ export default function AdminDashboard() {
   const [questionModalOpen, setQuestionModalOpen] = useState(false)
   const [uploadMessage, setUploadMessage] = useState('')
   const [uploadError, setUploadError] = useState('')
-  const [newQuestion, setNewQuestion] = useState({ prompt: '', options: ['', '', '', ''], correctAnswer: '' })
+  const [newQuestion, setNewQuestion] = useState(() => newQuestionDraft())
   const [editingQuestionId, setEditingQuestionId] = useState(null)
   const [helpOpen, setHelpOpen] = useState(false)
   const fileInput = useRef(null)
@@ -113,18 +114,19 @@ export default function AdminDashboard() {
       if (typeof prompt !== 'string' || !prompt.trim()) {
         throw new Error(`Question ${index + 1} needs a question or prompt field.`)
       }
-      if (!Array.isArray(item.options) || item.options.length < 2 || item.options.some((option) => typeof option !== 'string' || !option.trim())) {
-        throw new Error(`Question ${index + 1} needs at least two non-empty options.`)
+      const type = item.type || 'mcq'
+      if (type === 'mcq' || type === 'multi_select') {
+        if (!Array.isArray(item.options) || item.options.length < 2 || item.options.some((option) => typeof option !== 'string' || !option.trim())) {
+          throw new Error(`Question ${index + 1} needs at least two non-empty options.`)
+        }
       }
-      if (typeof item.correctAnswer !== 'string' || !item.correctAnswer.trim()) {
+      if (type === 'mcq' && (typeof item.correctAnswer !== 'string' || !item.correctAnswer.trim())) {
         throw new Error(`Question ${index + 1} needs a correctAnswer field.`)
       }
       return {
-        id: `Q-${Date.now()}-${index + 1}`,
+        ...item,
+        type,
         prompt: prompt.trim(),
-        options: item.options,
-        correctAnswer: item.correctAnswer.trim(),
-        status: 'Published',
       }
     })
   }
@@ -149,7 +151,14 @@ export default function AdminDashboard() {
   }
 
   function downloadTemplate() {
-    const template = [{ question: 'What is 2 + 2?', options: ['3', '4', '5', '6'], correctAnswer: '4' }]
+    const template = [
+      { type: 'mcq', prompt: 'What is 2 + 2?', options: ['3', '4', '5', '6'], correctAnswer: '4', points: 2, difficulty: 'Easy' },
+      { type: 'multi_select', prompt: 'Select the prime numbers.', options: ['2', '3', '4', '5'], correctAnswers: ['2', '3', '5'], partialCredit: true, points: 3 },
+      { type: 'true_false', prompt: 'HTTP is stateless.', correctAnswer: 'True', points: 1 },
+      { type: 'short_answer', prompt: 'Which browser kiosk app integrates with Muna?', acceptedAnswers: ['Safe Exam Browser', 'SEB'], points: 2 },
+      { type: 'theory', prompt: 'Explain why grading must run server-side.', points: 10, rubric: [{ criterion: 'Security boundary', points: 5, description: 'Explains client code inspection.' }, { criterion: 'Server authority', points: 5, description: 'Explains authoritative grading.' }] },
+      { type: 'drawing', prompt: 'Sketch the attempt lifecycle.', points: 5, rubric: [{ criterion: 'States', points: 5, description: 'Shows Active, Submitted, Terminated.' }] },
+    ]
     const url = URL.createObjectURL(new Blob([JSON.stringify(template, null, 2)], { type: 'application/json' }))
     const link = document.createElement('a')
     link.href = url
@@ -160,11 +169,7 @@ export default function AdminDashboard() {
 
   async function addQuestion(event) {
     event.preventDefault()
-    const question = {
-      prompt: newQuestion.prompt.trim(),
-      options: newQuestion.options.map((option) => option.trim()),
-      correctAnswer: newQuestion.correctAnswer.trim(),
-    }
+    const question = draftToPayload(newQuestion)
     setUploadError('')
     try {
       const response = editingQuestionId
@@ -174,7 +179,7 @@ export default function AdminDashboard() {
         ? current.map((item) => item.id === editingQuestionId ? response.question : item)
         : [response.question, ...current])
       if (!editingQuestionId) setSummary((current) => ({ ...current, totalQuestions: current.totalQuestions + 1 }))
-      setNewQuestion({ prompt: '', options: ['', '', '', ''], correctAnswer: '' })
+      setNewQuestion(newQuestionDraft())
       setEditingQuestionId(null)
       setQuestionModalOpen(false)
       setUploadMessage(editingQuestionId ? 'Question updated.' : 'Question added to the question bank.')
@@ -186,11 +191,7 @@ export default function AdminDashboard() {
 
   function editQuestion(question) {
     setEditingQuestionId(question.id)
-    setNewQuestion({
-      prompt: question.prompt,
-      options: [...question.options],
-      correctAnswer: question.correctAnswer,
-    })
+    setNewQuestion(questionToDraft(question))
     setUploadError('')
     setQuestionModalOpen(true)
   }
@@ -280,7 +281,7 @@ export default function AdminDashboard() {
     }
   }
 
-  async function markAnswerReviewed(answerId, decision = 'Approved', feedback = '') {
+  async function markAnswerReviewed(answerId, decision = 'Approved', feedback = '', itemGrades = []) {
     if (decision === 'Revision requested' && !feedback.trim()) {
       setAnswerReviewError('Add feedback before requesting a revision.')
       return
@@ -288,7 +289,7 @@ export default function AdminDashboard() {
     try {
       const response = await apiRequest(`/answers/${encodeURIComponent(answerId)}/review`, {
         method: 'PATCH',
-        body: { decision, feedback },
+        body: { decision, feedback, itemGrades },
         csrfToken,
       })
       setAnswers((current) => current.map((answer) => answer.id === answerId ? response.answer : answer))
@@ -484,7 +485,7 @@ export default function AdminDashboard() {
   }
   const openQuestionModal = () => {
     setEditingQuestionId(null)
-    setNewQuestion({ prompt: '', options: ['', '', '', ''], correctAnswer: '' })
+    setNewQuestion(newQuestionDraft())
     setUploadError('')
     setQuestionModalOpen(true)
   }
@@ -532,7 +533,7 @@ export default function AdminDashboard() {
         <footer className="footer"><span>© 2026 Muna learning</span><span>Admin workspace <i /> All systems operational</span></footer>
       </main>
       {questionModalOpen && <QuestionModal question={newQuestion} editing={Boolean(editingQuestionId)} onQuestionChange={setNewQuestion} error={uploadError} onClose={() => { setQuestionModalOpen(false); setEditingQuestionId(null) }} onSubmit={addQuestion} />}
-      {selectedAnswer && <AnswerReviewModal answer={selectedAnswer} feedback={answerFeedback} error={answerReviewError} onFeedbackChange={(feedback) => { setAnswerFeedback(feedback); setAnswerReviewError('') }} onClose={() => setSelectedAnswer(null)} onReview={(decision) => markAnswerReviewed(selectedAnswer.id, decision, answerFeedback)} />}
+      {selectedAnswer && <AnswerReviewModal answer={selectedAnswer} feedback={answerFeedback} error={answerReviewError} onFeedbackChange={(feedback) => { setAnswerFeedback(feedback); setAnswerReviewError('') }} onClose={() => setSelectedAnswer(null)} onReview={(decision, itemGrades) => markAnswerReviewed(selectedAnswer.id, decision, answerFeedback, itemGrades)} />}
       {selectedFlag && <FlagReviewModal flag={selectedFlag} note={flagReviewNote} error={flagReviewError} onNoteChange={(note) => { setFlagReviewNote(note); setFlagReviewError('') }} onClose={() => setSelectedFlag(null)} onReview={(decision) => markFlagReviewed(selectedFlag.id, decision)} />}
       {helpOpen && <HelpCenterModal onClose={() => setHelpOpen(false)} onNavigate={navigate} />}
     </div>

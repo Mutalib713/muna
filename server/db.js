@@ -26,9 +26,15 @@ export function createDatabase(filename) {
   db.exec(`
     CREATE TABLE IF NOT EXISTS questions (
       id TEXT PRIMARY KEY,
+      type TEXT NOT NULL DEFAULT 'mcq',
       prompt TEXT NOT NULL,
       options_json TEXT NOT NULL,
       correct_answer TEXT NOT NULL,
+      points REAL NOT NULL DEFAULT 1,
+      difficulty TEXT NOT NULL DEFAULT 'Medium',
+      tags_json TEXT NOT NULL DEFAULT '[]',
+      config_json TEXT NOT NULL DEFAULT '{}',
+      rubric_json TEXT NOT NULL DEFAULT '[]',
       status TEXT NOT NULL DEFAULT 'Published',
       created_at TEXT NOT NULL
     );
@@ -44,7 +50,11 @@ export function createDatabase(filename) {
       review_decision TEXT,
       feedback TEXT,
       reviewed_by TEXT,
-      reviewed_at TEXT
+      reviewed_at TEXT,
+      attempt_id TEXT,
+      items_json TEXT NOT NULL DEFAULT '[]',
+      earned_points REAL,
+      max_points REAL
     );
     CREATE TABLE IF NOT EXISTS flags (
       id TEXT PRIMARY KEY,
@@ -101,6 +111,9 @@ export function createDatabase(filename) {
       mentee_id TEXT NOT NULL REFERENCES mentees(id) ON DELETE CASCADE,
       answers_json TEXT NOT NULL,
       score TEXT NOT NULL,
+      grading_status TEXT NOT NULL DEFAULT 'Graded',
+      earned_points REAL NOT NULL DEFAULT 0,
+      max_points REAL NOT NULL DEFAULT 0,
       submitted_at TEXT NOT NULL
     );
     CREATE INDEX IF NOT EXISTS assessment_attempts_lookup_idx
@@ -153,6 +166,27 @@ export function createDatabase(filename) {
     CREATE INDEX IF NOT EXISTS invitations_org_idx
       ON invitations (organisation_id, created_at);
   `)
+
+  function ensureColumn(table, column, definition) {
+    const columns = db.prepare(`PRAGMA table_info(${table})`).all()
+    if (!columns.some((col) => col.name === column)) {
+      db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`)
+    }
+  }
+
+  ensureColumn('questions', 'type', "TEXT NOT NULL DEFAULT 'mcq'")
+  ensureColumn('questions', 'points', 'REAL NOT NULL DEFAULT 1')
+  ensureColumn('questions', 'difficulty', "TEXT NOT NULL DEFAULT 'Medium'")
+  ensureColumn('questions', 'tags_json', "TEXT NOT NULL DEFAULT '[]'")
+  ensureColumn('questions', 'config_json', "TEXT NOT NULL DEFAULT '{}'")
+  ensureColumn('questions', 'rubric_json', "TEXT NOT NULL DEFAULT '[]'")
+  ensureColumn('answers', 'attempt_id', 'TEXT')
+  ensureColumn('answers', 'items_json', "TEXT NOT NULL DEFAULT '[]'")
+  ensureColumn('answers', 'earned_points', 'REAL')
+  ensureColumn('answers', 'max_points', 'REAL')
+  ensureColumn('assessment_attempts', 'grading_status', "TEXT NOT NULL DEFAULT 'Graded'")
+  ensureColumn('assessment_attempts', 'earned_points', 'REAL NOT NULL DEFAULT 0')
+  ensureColumn('assessment_attempts', 'max_points', 'REAL NOT NULL DEFAULT 0')
 
   const seed = db.transaction(() => {
     if (db.prepare('SELECT COUNT(*) AS count FROM questions').get().count === 0) {
@@ -218,12 +252,31 @@ export function createDatabase(filename) {
   return db
 }
 
+function parseJson(value, fallback) {
+  if (!value) return fallback
+  try {
+    return JSON.parse(value)
+  } catch {
+    return fallback
+  }
+}
+
 export function questionFromRow(row) {
+  const config = parseJson(row.config_json, {})
   return {
     id: row.id,
+    type: row.type || 'mcq',
     prompt: row.prompt,
-    options: JSON.parse(row.options_json),
+    options: parseJson(row.options_json, []),
     correctAnswer: row.correct_answer,
+    correctAnswers: Array.isArray(config.correctAnswers) ? config.correctAnswers : [],
+    partialCredit: Boolean(config.partialCredit),
+    acceptedAnswers: Array.isArray(config.acceptedAnswers) ? config.acceptedAnswers : [],
+    instructions: typeof config.instructions === 'string' ? config.instructions : '',
+    points: Number(row.points ?? 1),
+    difficulty: row.difficulty || 'Medium',
+    tags: parseJson(row.tags_json, []),
+    rubric: parseJson(row.rubric_json, []),
     status: row.status,
     createdAt: row.created_at,
   }
@@ -232,11 +285,15 @@ export function questionFromRow(row) {
 export function answerFromRow(row) {
   return {
     id: row.id,
+    attemptId: row.attempt_id || null,
     student: row.student,
     initials: row.initials,
     question: row.assessment,
     answer: row.answer,
     score: row.score,
+    earnedPoints: row.earned_points ?? null,
+    maxPoints: row.max_points ?? null,
+    items: parseJson(row.items_json, []),
     submitted: row.submitted_at,
     status: row.status,
     reviewDecision: row.review_decision,
