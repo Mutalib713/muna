@@ -16,34 +16,6 @@ import './Dashboard.css'
 // on the admin-dashboard branch; integrated onto main at #/dashboard and
 // split into per-view files so views can be built independently).
 //
-// CONTEXT CONTRACT: every view in views/registry.js receives a single
-// `dashboard` prop — the object built in this component. Fields:
-//   questions, answers, flags          records loaded from the admin API
-//   summary, mentees, assessments      API-backed overview/people/assessments
-//   members, invitations               org-plane demo records (dashboardData.js)
-//   activeInvites                      count of Active invitations
-//   search                             topbar search string
-//   answerFilter, setAnswerFilter      Answer review filter state
-//   pendingAnswers, unresolvedFlags    derived counts for headers/badges
-//   navigate(label)                    switch view + clear search
-//   openQuestionModal()                open the Add-question dialog
-//   selectAnswer(answer)               open the answer review dialog
-//   downloadTemplate()                 download question JSON template
-//   handleQuestionUpload(event)        import questions JSON file
-//   uploadMessage, uploadError         upload feedback strings
-//   fileInput                          ref to the hidden file input
-//   selectFlag, markFlagReviewed(...)  integrity review modal + API decision
-//   flagReviewNote, setFlagReviewNote, flagReviewError
-//   createAssessment, updateAssessmentStatus
-//   updateMemberRole(id, role)         change a member's organisation role
-//   toggleMemberStatus(id)             suspend / restore a member
-//   removeMember(id)                   remove a member from the organisation
-//   createInvitation({type, email, role, days, maxUses})
-//                                      create an invitation, returns it
-//   revokeInvitation(id)               revoke an outstanding invitation
-//
-// Members/invitations remain local demo records until the backend exposes
-// organisation endpoints; everything else is persisted in SQLite.
 // Each registered view receives the same `dashboard` context object.
 export default function AdminDashboard() {
   const [authStatus, setAuthStatus] = useState('checking')
@@ -200,12 +172,6 @@ export default function AdminDashboard() {
     }
     setUploadError('')
     try {
-      const response = await apiRequest('/questions', { method: 'POST', body: question, csrfToken })
-      setQuestions((current) => [response.question, ...current])
-      setSummary((current) => ({ ...current, totalQuestions: current.totalQuestions + 1 }))
-      setNewQuestion({ prompt: '', options: ['', '', '', ''], correctAnswer: '' })
-      setQuestionModalOpen(false)
-      setUploadMessage('Question added to the question bank.')
       const response = editingQuestionId
         ? await apiRequest(`/questions/${encodeURIComponent(editingQuestionId)}`, { method: 'PATCH', body: question, csrfToken })
         : await apiRequest('/questions', { method: 'POST', body: question, csrfToken })
@@ -393,38 +359,6 @@ export default function AdminDashboard() {
     }
   }
 
-  function updateMemberRole(memberId, role) {
-    setMembers((current) => current.map((member) => member.id === memberId ? { ...member, role } : member))
-  }
-
-  function toggleMemberStatus(memberId) {
-    setMembers((current) => current.map((member) => member.id === memberId ? { ...member, status: member.status === 'Active' ? 'Suspended' : 'Active' } : member))
-  }
-
-  function removeMember(memberId) {
-    setMembers((current) => current.filter((member) => member.id !== memberId))
-  }
-
-  function createInvitation({ type, email, role, days, maxUses }) {
-    const now = new Date()
-    const code = `INV-${Math.random().toString(36).slice(2, 8).toUpperCase()}`
-    const invite = {
-      id: code,
-      type,
-      email: type === 'email' ? email.trim() : null,
-      role,
-      created: 'Just now',
-      expires: new Date(now.getTime() + days * 86400000).toISOString().slice(0, 10),
-      maxUses: type === 'email' ? 1 : Math.max(1, Number(maxUses) || 1),
-      uses: 0,
-      revoked: false,
-    }
-    setInvitations((current) => [invite, ...current])
-    return invite
-  }
-
-  function revokeInvitation(invitationId) {
-    setInvitations((current) => current.map((invite) => invite.id === invitationId ? { ...invite, revoked: true } : invite))
   async function updateAssessment(assessmentId, input) {
     try {
       const response = await apiRequest(`/assessments/${encodeURIComponent(assessmentId)}`, { method: 'PATCH', body: input, csrfToken })
@@ -477,11 +411,44 @@ export default function AdminDashboard() {
     }
   }
 
+  function updateMemberRole(memberId, role) {
+    setMembers((current) => current.map((member) => member.id === memberId ? { ...member, role } : member))
+  }
+
+  function toggleMemberStatus(memberId) {
+    setMembers((current) => current.map((member) => member.id === memberId ? { ...member, status: member.status === 'Active' ? 'Suspended' : 'Active' } : member))
+  }
+
+  function removeMember(memberId) {
+    setMembers((current) => current.filter((member) => member.id !== memberId))
+  }
+
+  function createInvitation({ type, email, role, days, maxUses }) {
+    const now = new Date()
+    const code = `INV-${Math.random().toString(36).slice(2, 8).toUpperCase()}`
+    const invite = {
+      id: code,
+      type,
+      email: type === 'email' ? email.trim() : null,
+      role,
+      created: 'Just now',
+      expires: new Date(now.getTime() + days * 86400000).toISOString().slice(0, 10),
+      maxUses: type === 'email' ? 1 : Math.min(100, Math.max(1, Number(maxUses) || 1)),
+      uses: 0,
+      revoked: false,
+    }
+    setInvitations((current) => [invite, ...current])
+    return invite
+  }
+
+  function revokeInvitation(invitationId) {
+    setInvitations((current) => current.map((invite) => invite.id === invitationId ? { ...invite, revoked: true } : invite))
+  }
+
   const navigate = (label) => {
     setActiveView(label)
     setSearch('')
   }
-  const openQuestionModal = () => setQuestionModalOpen(true)
   const openQuestionModal = () => {
     setEditingQuestionId(null)
     setNewQuestion({ prompt: '', options: ['', '', '', ''], correctAnswer: '' })
@@ -495,23 +462,10 @@ export default function AdminDashboard() {
   }
 
   const dashboard = {
-    questions, answers, flags, search, summary, assessments, mentees,
+    questions, answers, flags, search, summary, assessments, mentees, admin,
     members, invitations,
     answerFilter, setAnswerFilter,
     pendingAnswers, unresolvedFlags, activeInvites,
-    navigate, openQuestionModal, selectAnswer,
-    downloadTemplate, handleQuestionUpload,
-    uploadMessage, uploadError, fileInput,
-    selectFlag, markFlagReviewed, flagReviewNote, setFlagReviewNote, flagReviewError,
-    createAssessment, updateAssessmentStatus,
-    updateMemberRole, toggleMemberStatus, removeMember,
-    createInvitation, revokeInvitation,
-  }
-
-  const badges = { answers: pendingAnswers, flags: unresolvedFlags, invites: activeInvites }
-    questions, answers, flags, search, summary, assessments, mentees, admin,
-    answerFilter, setAnswerFilter,
-    pendingAnswers, unresolvedFlags,
     navigate, openQuestionModal, selectAnswer,
     downloadTemplate, handleQuestionUpload,
     editQuestion, deleteQuestion,
@@ -519,9 +473,11 @@ export default function AdminDashboard() {
     selectFlag, markFlagReviewed, flagReviewNote, setFlagReviewNote, flagReviewError,
     createAssessment, updateAssessmentStatus, updateAssessment, deleteAssessment,
     createMentee, updateMentee, deleteMentee,
+    updateMemberRole, toggleMemberStatus, removeMember,
+    createInvitation, revokeInvitation,
   }
 
-  const badges = { answers: pendingAnswers, flags: unresolvedFlags }
+  const badges = { answers: pendingAnswers, flags: unresolvedFlags, invites: activeInvites }
   const activeEntry = dashboardViews.find((view) => view.label === activeView) ?? dashboardViews[0]
   const ActiveView = activeEntry.Component
 
@@ -535,10 +491,6 @@ export default function AdminDashboard() {
 
   return (
     <div className="app-shell">
-      <DashboardSidebar views={dashboardViews} activeView={activeView} badges={badges} admin={admin} onNavigate={navigate} onHelp={() => setApiError('Help center is not configured.')} />
-      <main className="main-area">
-        <DashboardTopbar activeView={activeView} search={search} admin={admin} onSearch={setSearch} onLogout={handleLogout} />
-        <div className="demo-banner" role="status"><Icon name="alert" size={16} /><span><strong>Sample records:</strong> submissions, integrity signals, mentees, members, and invitations are example data. Questions, assessments, and review decisions are saved in SQLite.</span></div>
       <DashboardSidebar views={dashboardViews} activeView={activeView} badges={badges} admin={admin} onNavigate={navigate} onHelp={() => setHelpOpen(true)} />
       <main className="main-area">
         <DashboardTopbar activeView={activeView} search={search} admin={admin} onSearch={setSearch} onLogout={handleLogout} />
@@ -546,9 +498,6 @@ export default function AdminDashboard() {
         <div className="content-area"><ActiveView dashboard={dashboard} /></div>
         <footer className="footer"><span>© 2026 Muna learning</span><span>Admin workspace <i /> All systems operational</span></footer>
       </main>
-      {questionModalOpen && <QuestionModal question={newQuestion} onQuestionChange={setNewQuestion} error={uploadError} onClose={() => setQuestionModalOpen(false)} onSubmit={addQuestion} />}
-      {selectedAnswer && <AnswerReviewModal answer={selectedAnswer} feedback={answerFeedback} error={answerReviewError} onFeedbackChange={(feedback) => { setAnswerFeedback(feedback); setAnswerReviewError('') }} onClose={() => setSelectedAnswer(null)} onReview={(decision) => markAnswerReviewed(selectedAnswer.id, decision, answerFeedback)} />}
-      {selectedFlag && <FlagReviewModal flag={selectedFlag} note={flagReviewNote} error={flagReviewError} onNoteChange={(note) => { setFlagReviewNote(note); setFlagReviewError('') }} onClose={() => setSelectedFlag(null)} onReview={(decision) => markFlagReviewed(selectedFlag.id, decision)} />}
       {questionModalOpen && <QuestionModal question={newQuestion} editing={Boolean(editingQuestionId)} onQuestionChange={setNewQuestion} error={uploadError} onClose={() => { setQuestionModalOpen(false); setEditingQuestionId(null) }} onSubmit={addQuestion} />}
       {selectedAnswer && <AnswerReviewModal answer={selectedAnswer} feedback={answerFeedback} error={answerReviewError} onFeedbackChange={(feedback) => { setAnswerFeedback(feedback); setAnswerReviewError('') }} onClose={() => setSelectedAnswer(null)} onReview={(decision) => markAnswerReviewed(selectedAnswer.id, decision, answerFeedback)} />}
       {selectedFlag && <FlagReviewModal flag={selectedFlag} note={flagReviewNote} error={flagReviewError} onNoteChange={(note) => { setFlagReviewNote(note); setFlagReviewError('') }} onClose={() => setSelectedFlag(null)} onReview={(decision) => markFlagReviewed(selectedFlag.id, decision)} />}

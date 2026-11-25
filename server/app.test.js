@@ -68,11 +68,6 @@ test('admin APIs require a session and persist questions, assessments, and revie
   assert.equal(mentees.status, 200)
   assert.equal(mentees.body.mentees.length, 5)
 
-  const assessment = await client.post('/api/assessments')
-    .set('X-CSRF-Token', csrfToken)
-    .send({ title: 'Algebra check-in', questionIds: ['Q-104'], menteeIds: ['M-001'] })
-  assert.equal(mentees.body.mentees.length, 0)
-
   const mentee = await client.post('/api/mentees')
     .set('X-CSRF-Token', csrfToken)
     .send({ name: 'Amara Okafor', email: 'amara@example.test' })
@@ -85,11 +80,6 @@ test('admin APIs require a session and persist questions, assessments, and revie
   assert.equal(assessment.body.assessment.maxAttempts, 3)
   assert.equal(assessment.body.assessment.status, 'Draft')
   assert.deepEqual(assessment.body.assessment.questionIds, ['Q-104'])
-  assert.deepEqual(assessment.body.assessment.menteeIds, ['M-001'])
-
-  const invalidAttemptLimit = await client.post('/api/assessments')
-    .set('X-CSRF-Token', csrfToken)
-    .send({ title: 'Invalid assessment', questionIds: ['Q-104'], menteeIds: ['M-001'], maxAttempts: 4 })
   assert.deepEqual(assessment.body.assessment.menteeIds, [mentee.body.mentee.id])
 
   const invalidAttemptLimit = await client.post('/api/assessments')
@@ -118,10 +108,9 @@ test('admin APIs require a session and persist questions, assessments, and revie
     .send({ prompt: 'Invalid key', options: ['A', 'B'], correctAnswer: 'C' })
   assert.equal(invalidQuestion.status, 400)
 
-  const review = await client.patch('/api/answers/A-2381/review')
   const submissions = await client.get('/api/answers')
   assert.equal(submissions.status, 200)
-  assert.equal(submissions.body.answers.length, 1)
+  assert.equal(submissions.body.answers.length, 6)
   const submissionId = submissions.body.answers[0].id
 
   const review = await client.patch(`/api/answers/${submissionId}/review`)
@@ -131,9 +120,6 @@ test('admin APIs require a session and persist questions, assessments, and revie
   assert.equal(review.body.answer.reviewDecision, 'Revision requested')
   assert.equal(review.body.answer.reviewHistory.length, 1)
   const persistedAnswer = await client.get('/api/answers')
-  assert.equal(persistedAnswer.body.answers.find((answer) => answer.id === 'A-2381').feedback, 'Please show your working.')
-
-  const flagReview = await client.patch('/api/flags/F-021/review')
   assert.equal(persistedAnswer.body.answers.find((answer) => answer.id === submissionId).feedback, 'Please show your working.')
 
   const createdFlag = await client.post('/api/flags')

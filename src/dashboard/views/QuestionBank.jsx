@@ -3,7 +3,6 @@ import Icon from '../DashboardIcon'
 
 // Receives the `dashboard` context bag from AdminDashboard.jsx.
 export default function QuestionBank({ dashboard }) {
-  const { questions, search, openQuestionModal, downloadTemplate, handleQuestionUpload, uploadMessage, uploadError, fileInput } = dashboard
   const { questions, search, openQuestionModal, downloadTemplate, handleQuestionUpload, uploadMessage, uploadError, fileInput, editQuestion, deleteQuestion } = dashboard
 
   const filteredQuestions = useMemo(
@@ -22,9 +21,6 @@ export default function QuestionBank({ dashboard }) {
         {uploadMessage && <p className="inline-message success-message" role="status">{uploadMessage}</p>}
         {uploadError && <p className="inline-message error-message" role="alert">{uploadError}</p>}
         <div className="panel-heading question-list-heading"><div><h2>All questions <span className="muted-count">{questions.length}</span></h2><p>Questions available for your assessments</p></div></div>
-        <div className="table-wrap"><table><thead><tr><th>QUESTION</th><th>OPTIONS</th><th>CORRECT ANSWER</th><th>STATUS</th></tr></thead><tbody>
-          {filteredQuestions.map((question) => <tr key={question.id}><td><div className="question-title"><span className="question-id">{question.id}</span><strong>{question.prompt}</strong></div></td><td>{question.options.length} options</td><td>{question.correctAnswer}</td><td><span className="status-pill status-published">{question.status}</span></td></tr>)}
-          {filteredQuestions.length === 0 && <tr><td className="empty-row" colSpan="4">No questions match your search.</td></tr>}
         <div className="table-wrap"><table><thead><tr><th>QUESTION</th><th>OPTIONS</th><th>CORRECT ANSWER</th><th>STATUS</th><th></th></tr></thead><tbody>
           {filteredQuestions.map((question) => <tr key={question.id}><td><div className="question-title"><span className="question-id">{question.id}</span><strong>{question.prompt}</strong></div></td><td>{question.options.length} options</td><td>{question.correctAnswer}</td><td><span className="status-pill status-published">{question.status}</span></td><td><div className="button-row compact-actions"><button className="small-button" onClick={() => editQuestion(question)}>Edit</button><button className="small-button danger-button" onClick={() => deleteQuestion(question.id)}>Delete</button></div></td></tr>)}
           {filteredQuestions.length === 0 && <tr><td className="empty-row" colSpan="5">No questions match your search.</td></tr>}

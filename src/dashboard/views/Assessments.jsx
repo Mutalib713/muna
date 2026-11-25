@@ -16,7 +16,6 @@ function newAssessmentForm() {
 }
 
 export default function Assessments({ dashboard }) {
-  const { questions, assessments, mentees, search, createAssessment: saveAssessment, updateAssessmentStatus } = dashboard
   const { questions, assessments, mentees, search, createAssessment: saveAssessment, updateAssessment: saveAssessmentChanges, deleteAssessment, updateAssessmentStatus } = dashboard
   const [modalOpen, setModalOpen] = useState(false)
   const [form, setForm] = useState(newAssessmentForm)
@@ -64,15 +63,6 @@ export default function Assessments({ dashboard }) {
     }
 
     try {
-      await saveAssessment({
-      title: form.title.trim(),
-      description: form.description.trim(),
-      questionIds: [...form.questionIds],
-      menteeIds: [...form.menteeIds],
-      maxAttempts: Number(form.maxAttempts),
-      })
-      setForm(newAssessmentForm())
-      setFormError('')
       const input = {
         title: form.title.trim(),
         description: form.description.trim(),
@@ -191,7 +181,6 @@ export default function Assessments({ dashboard }) {
                 </div>
                 <div className="assessment-actions">
                   {assessment.status === 'Draft'
-                    ? <button className="button button-primary assessment-action-button" onClick={() => togglePublishedState(assessment)}>Publish</button>
                     ? <><button className="small-button" onClick={() => editAssessment(assessment)}>Edit</button><button className="small-button" onClick={() => removeAssessment(assessment)}>Delete</button><button className="button button-primary assessment-action-button" onClick={() => togglePublishedState(assessment)}>Publish</button></>
                     : <button className="button button-secondary assessment-action-button" onClick={() => togglePublishedState(assessment)}>{assessment.status === 'Published' ? 'Pause' : 'Resume'}</button>}
                 </div>
@@ -206,12 +195,11 @@ export default function Assessments({ dashboard }) {
         </div>}
       </section>
 
-      <p className="assessment-data-note">Mentee records are sample workspace data. Assessment settings and assignments are saved in SQLite.</p>
+      <p className="assessment-data-note">Assessment settings and assignments are saved in SQLite. Mentee attempts can be opened at <code>#/learner/&lt;mentee-id&gt;</code>.</p>
 
       {modalOpen && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) closeModal() }}>
         <section className="modal-card assessment-modal" role="dialog" aria-modal="true" aria-labelledby="create-assessment-title">
           <div className="modal-heading">
-            <div><p className="eyebrow">ASSESSMENT BUILDER</p><h2 id="create-assessment-title">Create assessment</h2></div>
             <div><p className="eyebrow">ASSESSMENT BUILDER</p><h2 id="create-assessment-title">{editingAssessmentId ? 'Edit draft' : 'Create assessment'}</h2></div>
             <button className="icon-button" onClick={closeModal} aria-label="Close">×</button>
           </div>
@@ -229,7 +217,6 @@ export default function Assessments({ dashboard }) {
             </fieldset>
             <p className="assessment-draft-note">This creates a draft. Review the selected questions and mentees, then publish it to make it available.</p>
             {formError && <p className="inline-message error-message" role="alert">{formError}</p>}
-            <div className="modal-actions"><button type="button" className="button button-secondary" onClick={closeModal}>Cancel</button><button type="submit" className="button button-primary">Create draft</button></div>
             <div className="modal-actions"><button type="button" className="button button-secondary" onClick={closeModal}>Cancel</button><button type="submit" className="button button-primary">{editingAssessmentId ? 'Save draft' : 'Create draft'}</button></div>
           </form>
         </section>

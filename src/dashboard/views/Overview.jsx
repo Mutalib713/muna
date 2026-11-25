@@ -4,11 +4,9 @@ import AnswerTable from '../components/AnswerTable'
 
 // Receives the `dashboard` context bag from AdminDashboard.jsx.
 export default function Overview({ dashboard }) {
-  const { questions, answers, summary, pendingAnswers, unresolvedFlags, navigate, openQuestionModal, selectAnswer } = dashboard
-  const chartMax = Math.max(1, ...summary.weeklyActivity.map((item) => item.count))
   const { questions, answers, summary, pendingAnswers, unresolvedFlags, navigate, openQuestionModal, selectAnswer, admin } = dashboard
   const chartMax = Math.max(1, ...summary.weeklyActivity.map((item) => item.count))
-  const today = new Intl.DateTimeFormat('en', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' }).format(new Date())
+  const today = new Intl.DateTimeFormat('en-US', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' }).format(new Date())
   const firstName = (admin?.name || 'Admin').trim().split(/\s+/)[0]
   const hour = new Date().getHours()
   const greeting = hour < 12 ? 'Good morning' : hour < 18 ? 'Good afternoon' : 'Good evening'
@@ -16,19 +14,18 @@ export default function Overview({ dashboard }) {
   return (
     <>
       <div className="welcome-row">
-        <div><p className="eyebrow">MONDAY, NOVEMBER 23, 2026</p><h1>Good morning, Alex <span>✦</span></h1><p className="subheading">Here&apos;s what&apos;s happening with your assessments today.</p></div>
         <div><p className="eyebrow">{today.toUpperCase()}</p><h1>{greeting}, {firstName} <span>✦</span></h1><p className="subheading">Here&apos;s what&apos;s happening with your assessments today.</p></div>
         <button className="button button-primary" onClick={() => { navigate('Question bank'); openQuestionModal() }}><Icon name="plus" size={17} /> Create question</button>
       </div>
       <div className="stat-grid">
         <StatCard label="Total students" value={summary.totalStudents.toLocaleString()} change="Current roster" icon="users" tone="blue" />
         <StatCard label="Questions in bank" value={questions.length.toLocaleString()} change="Saved questions" icon="book" tone="purple" />
-        <StatCard label="Awaiting review" value={pendingAnswers.toString().padStart(2, '0')} change="Needs your attention" icon="clock" tone="amber" />
-        <StatCard label="Integrity flags" value={unresolvedFlags.toString().padStart(2, '0')} change="Require careful review" icon="shield" tone="rose" />
+        <StatCard label="Awaiting review" value={pendingAnswers.toString()} change="Needs your attention" icon="clock" tone="amber" />
+        <StatCard label="Integrity flags" value={unresolvedFlags.toString()} change="Require careful review" icon="shield" tone="rose" />
       </div>
       <div className="overview-grid">
         <section className="panel activity-panel">
-          <div className="panel-heading"><div><h2>Assessment activity</h2><p>Submissions over the past week</p></div><button className="select-button">This week <span>⌄</span></button></div>
+          <div className="panel-heading"><div><h2>Assessment activity</h2><p>Submissions over the past week</p></div><span className="chart-range">Last 7 days</span></div>
           <div className="chart" role="img" aria-label="Bar chart showing assessment activity across the week">
             <div className="chart-grid"><span>{chartMax}</span><span>{Math.round(chartMax * 0.75)}</span><span>{Math.round(chartMax * 0.5)}</span><span>{Math.round(chartMax * 0.25)}</span><span>0</span></div>
             <div className="chart-bars">{summary.weeklyActivity.map(({ day, count }) => <div className="chart-column" key={day}><div className="bar-track"><span className="bar" style={{ height: `${count === 0 ? 2 : Math.max(8, count / chartMax * 100)}%` }} /></div><span className="chart-day">{day}</span></div>)}</div>

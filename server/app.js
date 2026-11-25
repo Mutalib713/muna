@@ -234,9 +234,6 @@ export function createApp({ db, adminEmail, adminName = 'Administrator', passwor
 
   router.use(requireAdmin)
 
-  router.get('/questions', (req, res) => {
-    const rows = db.prepare('SELECT * FROM questions ORDER BY created_at DESC, id DESC').all()
-    res.json({ questions: rows.map(questionFromRow) })
   router.get('/learner/assessments/:menteeId', (req, res) => {
     const mentee = db.prepare('SELECT * FROM mentees WHERE id = ?').get(req.params.menteeId)
     if (!mentee) {
@@ -387,14 +384,6 @@ export function createApp({ db, adminEmail, adminName = 'Administrator', passwor
     res.status(201).json({ questions: imported })
   })
 
-  router.get('/mentees', (req, res) => {
-    const mentees = db.prepare('SELECT * FROM mentees ORDER BY name').all()
-    res.json({ mentees: mentees.map(menteeFromRow) })
-  })
-
-  router.get('/assessments', (req, res) => {
-    const rows = db.prepare('SELECT * FROM assessments ORDER BY created_at DESC, id DESC').all()
-    res.json({ assessments: rows.map((row) => assessmentFromRow(db, row)) })
   router.patch('/questions/:id', verifyCsrf, (req, res) => {
     const validationError = validateQuestion(req.body)
     if (validationError) {
@@ -562,12 +551,6 @@ export function createApp({ db, adminEmail, adminName = 'Administrator', passwor
     res.json({ assessment: assessmentFromRow(db, row) })
   })
 
-  router.get('/answers', (req, res) => {
-    const rows = db.prepare('SELECT * FROM answers ORDER BY submitted_at DESC').all()
-    res.json({ answers: rows.map((row) => ({
-      ...answerFromRow(row),
-      reviewHistory: getReviewHistory(db, 'answer', row.id),
-    })) })
   router.patch('/assessments/:id', verifyCsrf, (req, res) => {
     const existing = db.prepare('SELECT * FROM assessments WHERE id = ?').get(req.params.id)
     if (!existing) {
@@ -685,11 +668,6 @@ export function createApp({ db, adminEmail, adminName = 'Administrator', passwor
   })
 
   router.get('/flags', (req, res) => {
-    const rows = db.prepare('SELECT * FROM flags ORDER BY id DESC').all()
-    res.json({ flags: rows.map((row) => ({
-      ...flagFromRow(row),
-      reviewHistory: getReviewHistory(db, 'flag', row.id),
-    })) })
     const { page, limit, offset } = pagination(req)
     const search = typeof req.query.search === 'string' ? req.query.search.trim().toLowerCase() : ''
     const where = search ? 'WHERE lower(student) LIKE ? OR lower(assessment) LIKE ? OR lower(signal) LIKE ?' : ''
