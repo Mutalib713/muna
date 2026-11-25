@@ -1,7 +1,18 @@
+import { randomUUID } from 'node:crypto'
 import Database from 'better-sqlite3'
 
 function submittedAt(hoursAgo) {
   return new Date(Date.now() - hoursAgo * 60 * 60 * 1000).toISOString()
+}
+
+export function initialsFor(name) {
+  return String(name || '')
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((part) => part[0])
+    .join('')
+    .slice(0, 2)
+    .toUpperCase() || 'MU'
 }
 
 export function createDatabase(filename) {
@@ -100,6 +111,47 @@ export function createDatabase(filename) {
       expires INTEGER NOT NULL
     );
     CREATE INDEX IF NOT EXISTS sessions_expires_idx ON sessions (expires);
+    CREATE TABLE IF NOT EXISTS organisations (
+      id TEXT PRIMARY KEY,
+      slug TEXT NOT NULL UNIQUE,
+      name TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS users (
+      id TEXT PRIMARY KEY,
+      email TEXT NOT NULL UNIQUE,
+      name TEXT NOT NULL,
+      password_hash TEXT,
+      email_verified_at TEXT,
+      created_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS memberships (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      organisation_id TEXT NOT NULL REFERENCES organisations(id) ON DELETE CASCADE,
+      role TEXT NOT NULL CHECK (role IN ('Owner', 'Admin', 'Mentor', 'Mentee')),
+      status TEXT NOT NULL DEFAULT 'Active' CHECK (status IN ('Active', 'Suspended')),
+      joined_at TEXT NOT NULL,
+      UNIQUE (user_id, organisation_id)
+    );
+    CREATE INDEX IF NOT EXISTS memberships_org_idx
+      ON memberships (organisation_id, joined_at);
+    CREATE TABLE IF NOT EXISTS invitations (
+      id TEXT PRIMARY KEY,
+      organisation_id TEXT NOT NULL REFERENCES organisations(id) ON DELETE CASCADE,
+      type TEXT NOT NULL CHECK (type IN ('code', 'email')),
+      email TEXT,
+      role TEXT NOT NULL CHECK (role IN ('Admin', 'Mentor', 'Mentee')),
+      token_hash TEXT NOT NULL UNIQUE,
+      created_by TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      expires_at TEXT NOT NULL,
+      max_uses INTEGER NOT NULL CHECK (max_uses BETWEEN 1 AND 100),
+      uses INTEGER NOT NULL DEFAULT 0,
+      revoked INTEGER NOT NULL DEFAULT 0 CHECK (revoked IN (0, 1))
+    );
+    CREATE INDEX IF NOT EXISTS invitations_org_idx
+      ON invitations (organisation_id, created_at);
   `)
 
   const seed = db.transaction(() => {
@@ -231,4 +283,90 @@ export function assessmentFromRow(db, row) {
       WHERE assessment_id = ? ORDER BY assigned_at, mentee_id
     `).all(row.id).map((assignment) => assignment.mentee_id),
   }
+}
+
+export function memberFromRow(row) {
+  return {
+    id: row.id,
+    userId: row.user_id,
+    organisationId: row.organisation_id,
+    name: row.name,
+    initials: initialsFor(row.name),
+    email: row.email,
+    role: row.role,
+    status: row.status,
+    joined: row.joined_at,
+    joinedAt: row.joined_at,
+  }
+}
+
+export function getInvitationState(row) {
+  if (row.revoked) return 'Revoked'
+  if (new Date(row.expires_at ?? row.expires).getTime() <= Date.now()) return 'Expired'
+  if (row.uses >= row.max_uses) return 'Exhausted'
+  return 'Active'
+}
+
+export function invitationFromRow(row) {
+  return {
+    id: row.id,
+    organisationId: row.organisation_id,
+    type: row.type,
+    email: row.email,
+    role: row.role,
+    createdBy: row.created_by,
+    createdAt: row.created_at,
+    expiresAt: row.expires_at,
+    maxUses: row.max_uses,
+    uses: row.uses,
+    revoked: Boolean(row.revoked),
+    state: getInvitationState(row),
+  }
+}
+
+export function ensureWorkspaceBootstrap(db, {
+  adminEmail,
+  adminName = 'Administrator',
+  orgName = 'Muna Workspace',
+  orgSlug = 'muna-workspace',
+}) {
+  const email = String(adminEmail || '').trim().toLowerCase()
+  const name = String(adminName || 'Administrator').trim() || 'Administrator'
+
+  return db.transaction(() => {
+    const now = new Date().toISOString()
+    let organisation = db.prepare('SELECT * FROM organisations ORDER BY created_at ASC LIMIT 1').get()
+    if (!organisation) {
+      const orgId = 'ORG-DEFAULT'
+      db.prepare(`
+        INSERT INTO organisations (id, slug, name, created_at)
+        VALUES (?, ?, ?, ?)
+      `).run(orgId, orgSlug, orgName, now)
+      organisation = db.prepare('SELECT * FROM organisations WHERE id = ?').get(orgId)
+    }
+
+    let ownerUser = db.prepare('SELECT * FROM users WHERE lower(email) = ?').get(email)
+    if (!ownerUser) {
+      const userId = `U-${randomUUID().slice(0, 8).toUpperCase()}`
+      db.prepare(`
+        INSERT INTO users (id, email, name, password_hash, email_verified_at, created_at)
+        VALUES (?, ?, ?, NULL, ?, ?)
+      `).run(userId, email, name, now, now)
+      ownerUser = db.prepare('SELECT * FROM users WHERE id = ?').get(userId)
+    }
+
+    let ownerMembership = db.prepare(`
+      SELECT * FROM memberships WHERE user_id = ? AND organisation_id = ?
+    `).get(ownerUser.id, organisation.id)
+    if (!ownerMembership) {
+      const membershipId = `MEM-${randomUUID().slice(0, 8).toUpperCase()}`
+      db.prepare(`
+        INSERT INTO memberships (id, user_id, organisation_id, role, status, joined_at)
+        VALUES (?, ?, ?, 'Owner', 'Active', ?)
+      `).run(membershipId, ownerUser.id, organisation.id, now)
+      ownerMembership = db.prepare('SELECT * FROM memberships WHERE id = ?').get(membershipId)
+    }
+
+    return { organisation, ownerUser, ownerMembership }
+  })()
 }

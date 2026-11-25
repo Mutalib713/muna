@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { initialMembers, initialInvitations, getInvitationState } from './dashboardData'
+import { getInvitationState } from './dashboardData'
 import { dashboardViews } from './views/registry'
 import Icon from './DashboardIcon'
 import AdminLoginScreen from './components/AdminLoginScreen'
@@ -33,8 +33,8 @@ export default function AdminDashboard() {
   const [questions, setQuestions] = useState([])
   const [answers, setAnswers] = useState([])
   const [flags, setFlags] = useState([])
-  const [members, setMembers] = useState(initialMembers)
-  const [invitations, setInvitations] = useState(initialInvitations)
+  const [members, setMembers] = useState([])
+  const [invitations, setInvitations] = useState([])
   const [search, setSearch] = useState('')
   const [answerFilter, setAnswerFilter] = useState('All submissions')
   const [selectedAnswer, setSelectedAnswer] = useState(null)
@@ -63,12 +63,7 @@ export default function AdminDashboard() {
           const data = await loadDashboardData()
           if (!active) return
           setAdmin(user)
-          setQuestions(data.questions)
-          setAnswers(data.answers)
-          setFlags(data.flags)
-          setSummary(data.summary)
-          setMentees(data.mentees)
-          setAssessments(data.assessments)
+          applyDashboardData(data)
           setAuthStatus('authenticated')
         } catch (error) {
           if (error.status === 401) {
@@ -220,19 +215,25 @@ export default function AdminDashboard() {
     setSummary(data.summary)
     setMentees(data.mentees)
     setAssessments(data.assessments)
+    setMembers(data.members)
+    setInvitations(data.invitations)
+  }
+
+  function clearWorkspaceState() {
+    setAdmin(null)
+    setQuestions([])
+    setAnswers([])
+    setFlags([])
+    setAssessments([])
+    setMentees([])
+    setMembers([])
+    setInvitations([])
+    setSummary({ totalStudents: 0, totalQuestions: 0, weeklyActivity: [] })
   }
 
   function handleApiError(error) {
     if (error.status === 401) {
-      setAdmin(null)
-      setQuestions([])
-      setAnswers([])
-      setFlags([])
-      setAssessments([])
-      setMentees([])
-      setMembers(initialMembers)
-      setInvitations(initialInvitations)
-      setSummary({ totalStudents: 0, totalQuestions: 0, weeklyActivity: [] })
+      clearWorkspaceState()
       setAuthStatus('unauthenticated')
       clearCsrfTokenCache()
       requestCsrfToken()
@@ -269,15 +270,7 @@ export default function AdminDashboard() {
   async function handleLogout() {
     try {
       await apiRequest('/auth/logout', { method: 'POST', csrfToken })
-      setAdmin(null)
-      setQuestions([])
-      setAnswers([])
-      setFlags([])
-      setAssessments([])
-      setMentees([])
-      setMembers(initialMembers)
-      setInvitations(initialInvitations)
-      setSummary({ totalStudents: 0, totalQuestions: 0, weeklyActivity: [] })
+      clearWorkspaceState()
       setAuthStatus('unauthenticated')
       clearCsrfTokenCache()
       const { csrfToken: token } = await requestCsrfToken()
@@ -411,38 +404,78 @@ export default function AdminDashboard() {
     }
   }
 
-  function updateMemberRole(memberId, role) {
-    setMembers((current) => current.map((member) => member.id === memberId ? { ...member, role } : member))
-  }
-
-  function toggleMemberStatus(memberId) {
-    setMembers((current) => current.map((member) => member.id === memberId ? { ...member, status: member.status === 'Active' ? 'Suspended' : 'Active' } : member))
-  }
-
-  function removeMember(memberId) {
-    setMembers((current) => current.filter((member) => member.id !== memberId))
-  }
-
-  function createInvitation({ type, email, role, days, maxUses }) {
-    const now = new Date()
-    const code = `INV-${Math.random().toString(36).slice(2, 8).toUpperCase()}`
-    const invite = {
-      id: code,
-      type,
-      email: type === 'email' ? email.trim() : null,
-      role,
-      created: 'Just now',
-      expires: new Date(now.getTime() + days * 86400000).toISOString().slice(0, 10),
-      maxUses: type === 'email' ? 1 : Math.min(100, Math.max(1, Number(maxUses) || 1)),
-      uses: 0,
-      revoked: false,
+  async function updateMemberRole(memberId, role) {
+    try {
+      const response = await apiRequest(`/members/${encodeURIComponent(memberId)}`, {
+        method: 'PATCH',
+        body: { role },
+        csrfToken,
+      })
+      setMembers((current) => current.map((member) => member.id === memberId ? response.member : member))
+      if (role === 'Mentee') {
+        const [menteesData, summaryData] = await Promise.all([apiRequest('/mentees'), apiRequest('/dashboard/summary')])
+        setMentees(menteesData.mentees)
+        setSummary(summaryData)
+      }
+    } catch (error) {
+      if (error.status === 401) handleApiError(error)
+      throw error
     }
-    setInvitations((current) => [invite, ...current])
-    return invite
   }
 
-  function revokeInvitation(invitationId) {
-    setInvitations((current) => current.map((invite) => invite.id === invitationId ? { ...invite, revoked: true } : invite))
+  async function toggleMemberStatus(memberId) {
+    const existing = members.find((member) => member.id === memberId)
+    if (!existing) return
+    const nextStatus = existing.status === 'Active' ? 'Suspended' : 'Active'
+    try {
+      const response = await apiRequest(`/members/${encodeURIComponent(memberId)}`, {
+        method: 'PATCH',
+        body: { status: nextStatus },
+        csrfToken,
+      })
+      setMembers((current) => current.map((member) => member.id === memberId ? response.member : member))
+    } catch (error) {
+      if (error.status === 401) handleApiError(error)
+      throw error
+    }
+  }
+
+  async function removeMember(memberId) {
+    try {
+      await apiRequest(`/members/${encodeURIComponent(memberId)}`, { method: 'DELETE', csrfToken })
+      setMembers((current) => current.filter((member) => member.id !== memberId))
+    } catch (error) {
+      if (error.status === 401) handleApiError(error)
+      throw error
+    }
+  }
+
+  async function createInvitation({ type, email, role, days, maxUses }) {
+    try {
+      const response = await apiRequest('/invitations', {
+        method: 'POST',
+        body: { type, email, role, days, maxUses },
+        csrfToken,
+      })
+      setInvitations((current) => [response.invitation, ...current])
+      return response.invitation
+    } catch (error) {
+      if (error.status === 401) handleApiError(error)
+      throw error
+    }
+  }
+
+  async function revokeInvitation(invitationId) {
+    try {
+      const response = await apiRequest(`/invitations/${encodeURIComponent(invitationId)}`, {
+        method: 'DELETE',
+        csrfToken,
+      })
+      setInvitations((current) => current.map((invite) => invite.id === invitationId ? response.invitation : invite))
+    } catch (error) {
+      if (error.status === 401) handleApiError(error)
+      throw error
+    }
   }
 
   const navigate = (label) => {

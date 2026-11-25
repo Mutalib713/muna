@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { X } from '../icons'
+import apiRequest from '../dashboard/services/adminApi'
 
 const FOCUSABLE_SELECTOR = 'button, input, textarea, select, a[href], [tabindex]:not([tabindex="-1"])'
 
@@ -8,6 +9,7 @@ export default function ActionModal({ isOpen, onClose, modalType }) {
   const restoreFocusRef = useRef(null)
   const [modalCode, setModalCode] = useState('')
   const [modalStatus, setModalStatus] = useState(null)
+  const [checking, setChecking] = useState(false)
 
   // Remember focus origin and restore it when the dialog closes.
   useEffect(() => {
@@ -62,20 +64,26 @@ export default function ActionModal({ isOpen, onClose, modalType }) {
 
   if (!isOpen) return null
 
-  const handleModalSubmit = (e) => {
+  const handleModalSubmit = async (e) => {
     e.preventDefault()
-    if (!modalCode.trim()) return
-
-    if (modalCode.toUpperCase().includes('MUNA') || modalCode.toUpperCase().includes('BRIGHT')) {
+    const code = modalCode.trim()
+    if (!code) return
+    setChecking(true)
+    setModalStatus(null)
+    try {
+      const { invitation } = await apiRequest(`/invitations/${encodeURIComponent(code)}`)
       setModalStatus({
         valid: true,
-        message: '✓ Verified: Bright Minds Academy (3 assessments assigned).'
+        token: code,
+        message: `✓ Verified: ${invitation.organisationName} (joining as ${invitation.role}).`,
       })
-    } else {
+    } catch (error) {
       setModalStatus({
         valid: false,
-        message: 'Invalid code. Please check with your mentor.'
+        message: error.message || 'Invalid code. Please check with your mentor.',
       })
+    } finally {
+      setChecking(false)
     }
   }
 
@@ -174,9 +182,18 @@ export default function ActionModal({ isOpen, onClose, modalType }) {
                 >
                   Close
                 </button>
-                <button type="submit" className="btn btn-primary">
-                  Verify &amp; Join
-                </button>
+                {modalStatus?.valid && modalStatus.token ? (
+                  <a
+                    className="btn btn-primary"
+                    href={`/invite/${encodeURIComponent(modalStatus.token)}`}
+                  >
+                    Continue to join
+                  </a>
+                ) : (
+                  <button type="submit" className="btn btn-primary" disabled={checking}>
+                    {checking ? 'Checking…' : 'Verify & Join'}
+                  </button>
+                )}
               </div>
             </form>
           </>

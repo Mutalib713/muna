@@ -14,6 +14,7 @@ import './App.css'
 
 const Signup = lazy(() => import('./pages/Signup.jsx'))
 const Login = lazy(() => import('./pages/Login.jsx'))
+const InviteAccept = lazy(() => import('./pages/InviteAccept.jsx'))
 
 // Minimal hash routing: #/dashboard opens the admin workspace, #/learner/<id>
 // opens a learner attempt, everything else shows the landing page. Proper
@@ -34,6 +35,18 @@ export default function App() {
   const [modalType, setModalType] = useState('join') // 'join' | 'mentor'
   const hash = useHashRoute()
   const path = window.location.pathname
+
+  if (path.startsWith('/invite/') || hash.startsWith('#/invite/')) {
+    const rawToken = path.startsWith('/invite/')
+      ? path.slice('/invite/'.length)
+      : hash.slice('#/invite/'.length)
+    const token = decodeURIComponent(rawToken.split(/[?#]/)[0] || '')
+    return (
+      <Suspense fallback={<LoadingScreen label="Loading invitation" />}>
+        <InviteAccept token={token} />
+      </Suspense>
+    )
+  }
 
   if (path === '/signup' || path === '/login') {
     const AuthPage = path === '/signup' ? Signup : Login

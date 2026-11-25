@@ -38,13 +38,15 @@ export function clearCsrfTokenCache() {
 }
 
 export async function loadDashboardData() {
-  const [questions, answers, flags, summary, mentees, assessments] = await Promise.all([
+  const [questions, answers, flags, summary, mentees, assessments, membersData, invitationsData] = await Promise.all([
     apiRequest('/questions'),
     apiRequest('/answers'),
     apiRequest('/flags'),
     apiRequest('/dashboard/summary'),
     apiRequest('/mentees'),
     apiRequest('/assessments'),
+    apiRequest('/members'),
+    apiRequest('/invitations'),
   ])
   return {
     questions: questions.questions,
@@ -53,6 +55,9 @@ export async function loadDashboardData() {
     summary,
     mentees: mentees.mentees,
     assessments: assessments.assessments,
+    organisation: membersData.organisation,
+    members: membersData.members,
+    invitations: invitationsData.invitations,
   }
 }
 

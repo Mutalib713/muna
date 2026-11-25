@@ -1,5 +1,5 @@
 import { Buffer } from 'node:buffer'
-import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto'
+import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto'
 import { existsSync } from 'node:fs'
 import path from 'node:path'
 import bcrypt from 'bcryptjs'
@@ -7,7 +7,18 @@ import express from 'express'
 import session from 'express-session'
 import rateLimit from 'express-rate-limit'
 import helmet from 'helmet'
-import { answerFromRow, assessmentFromRow, flagFromRow, menteeFromRow, questionFromRow } from './db.js'
+import {
+  answerFromRow,
+  assessmentFromRow,
+  ensureWorkspaceBootstrap,
+  flagFromRow,
+  getInvitationState,
+  initialsFor,
+  invitationFromRow,
+  memberFromRow,
+  menteeFromRow,
+  questionFromRow,
+} from './db.js'
 import { SQLiteSessionStore } from './sqlite-session-store.js'
 
 const SESSION_TTL_MS = 8 * 60 * 60 * 1000
@@ -87,6 +98,56 @@ function validateAssessment(input) {
   return null
 }
 
+const INVITABLE_ROLES = ['Admin', 'Mentor', 'Mentee']
+const MEMBER_STATUSES = ['Active', 'Suspended']
+
+function hashInvitationToken(token) {
+  return createHash('sha256').update(String(token || '').trim()).digest('hex')
+}
+
+function isValidEmail(email) {
+  return typeof email === 'string' && email.length > 0 && email.length <= 254 && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)
+}
+
+function maskEmail(email) {
+  if (!email) return null
+  const [local, domain] = email.split('@')
+  if (!local || !domain) return null
+  return `${local[0]}${'*'.repeat(Math.min(4, Math.max(1, local.length - 1)))}@${domain}`
+}
+
+function validateInvitationCreate(input) {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return 'Invitation details are required.'
+  const type = input.type
+  if (type !== 'code' && type !== 'email') return 'Invitation type must be code or email.'
+  const role = input.role
+  if (!INVITABLE_ROLES.includes(role)) return 'Role must be Admin, Mentor, or Mentee.'
+  const days = Number(input.days ?? 7)
+  if (!Number.isInteger(days) || days < 1 || days > 90) return 'Expiry must be between 1 and 90 days.'
+  if (type === 'email') {
+    const email = typeof input.email === 'string' ? input.email.trim().toLowerCase() : ''
+    if (!isValidEmail(email)) return 'A valid recipient email address is required.'
+  } else {
+    const maxUses = Number(input.maxUses ?? 10)
+    if (!Number.isInteger(maxUses) || maxUses < 1 || maxUses > 100) {
+      return 'Maximum uses must be a whole number between 1 and 100.'
+    }
+  }
+  return null
+}
+
+function validateInviteAccept(input) {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return 'Account details are required.'
+  const name = typeof input.name === 'string' ? input.name.trim() : ''
+  const email = typeof input.email === 'string' ? input.email.trim().toLowerCase() : ''
+  const password = typeof input.password === 'string' ? input.password : ''
+  if (!name || name.length > 120) return 'Full name must contain 1 to 120 characters.'
+  if (!isValidEmail(email)) return 'A valid email address is required.'
+  if (password.length < 8) return 'Password must be at least 8 characters long.'
+  if (Buffer.byteLength(password, 'utf8') > 72) return 'Password must be no more than 72 UTF-8 bytes.'
+  return null
+}
+
 function validateMentee(input) {
   if (!input || typeof input !== 'object' || Array.isArray(input)) return 'Mentee details are required.'
   const name = typeof input.name === 'string' ? input.name.trim() : ''
@@ -94,10 +155,6 @@ function validateMentee(input) {
   if (!name || name.length > 120) return 'Mentee name must contain 1 to 120 characters.'
   if (!email || email.length > 254 || !email.includes('@')) return 'A valid mentee email is required.'
   return null
-}
-
-function initialsFor(name) {
-  return name.split(/\s+/).filter(Boolean).map((part) => part[0]).join('').slice(0, 2).toUpperCase()
 }
 
 function pagination(req, defaultLimit = 25) {
@@ -131,15 +188,35 @@ function getReviewHistory(db, entityType, entityId) {
   `).all(entityType, entityId)
 }
 
-export function createApp({ db, adminEmail, adminName = 'Administrator', passwordHash, sessionSecret, production = false, trustProxyHops = 0, distPath }) {
+export function createApp({
+  db,
+  adminEmail,
+  adminName = 'Administrator',
+  passwordHash,
+  sessionSecret,
+  production = false,
+  trustProxyHops = 0,
+  distPath,
+  orgName = 'Muna Workspace',
+  orgSlug = 'muna-workspace',
+}) {
   const app = express()
   const router = express.Router()
+  const workspace = ensureWorkspaceBootstrap(db, { adminEmail, adminName, orgName, orgSlug })
+  const organisationId = workspace.organisation.id
   const loginLimiter = rateLimit({
     windowMs: 15 * 60 * 1000,
     limit: 10,
     standardHeaders: 'draft-8',
     legacyHeaders: false,
     message: { error: 'Too many sign-in attempts. Try again in 15 minutes.' },
+  })
+  const inviteLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000,
+    limit: 30,
+    standardHeaders: 'draft-8',
+    legacyHeaders: false,
+    message: { error: 'Too many invitation checks. Try again in 15 minutes.' },
   })
 
   app.disable('x-powered-by')
@@ -218,7 +295,14 @@ export function createApp({ db, adminEmail, adminName = 'Administrator', passwor
   })
 
   router.get('/auth/me', requireAdmin, (req, res) => {
-    res.json({ user: req.session.admin })
+    res.json({
+      user: req.session.admin,
+      organisation: {
+        id: workspace.organisation.id,
+        slug: workspace.organisation.slug,
+        name: workspace.organisation.name,
+      },
+    })
   })
 
   router.post('/auth/logout', requireAdmin, verifyCsrf, (req, res, next) => {
@@ -230,6 +314,193 @@ export function createApp({ db, adminEmail, adminName = 'Administrator', passwor
       res.clearCookie('muna.sid', { httpOnly: true, sameSite: 'strict', secure: production, path: '/' })
       res.json({ ok: true })
     })
+  })
+
+  function findInvitationByToken(rawToken) {
+    const token = typeof rawToken === 'string' ? rawToken.trim() : ''
+    if (!token || token.length > 200) return null
+    const tokenHash = hashInvitationToken(token)
+    return db.prepare(`
+      SELECT i.*, o.name AS organisation_name, o.slug AS organisation_slug
+      FROM invitations i
+      JOIN organisations o ON o.id = i.organisation_id
+      WHERE i.token_hash = ?
+    `).get(tokenHash)
+  }
+
+  function rejectUnusableInvitation(res, invitationRow) {
+    if (!invitationRow) {
+      res.status(404).json({ error: 'Invitation not found or invalid.', state: 'Invalid' })
+      return true
+    }
+    const state = getInvitationState(invitationRow)
+    if (state === 'Revoked') {
+      res.status(410).json({ error: 'This invitation has been revoked.', state })
+      return true
+    }
+    if (state === 'Expired') {
+      res.status(410).json({ error: 'This invitation has expired.', state })
+      return true
+    }
+    if (state === 'Exhausted') {
+      res.status(410).json({ error: 'This invitation has reached its maximum number of uses.', state })
+      return true
+    }
+    return false
+  }
+
+  router.get('/invitations/:token', inviteLimiter, (req, res) => {
+    const invitation = findInvitationByToken(req.params.token)
+    if (rejectUnusableInvitation(res, invitation)) return
+    res.json({
+      invitation: {
+        id: invitation.id,
+        organisationName: invitation.organisation_name,
+        organisationSlug: invitation.organisation_slug,
+        role: invitation.role,
+        type: invitation.type,
+        requiresEmailMatch: invitation.type === 'email',
+        emailHint: maskEmail(invitation.email),
+        inviterName: invitation.created_by,
+        expiresAt: invitation.expires_at,
+      },
+    })
+  })
+
+  router.post('/invitations/:token/accept', inviteLimiter, verifyCsrf, async (req, res, next) => {
+    try {
+      const validationError = validateInviteAccept(req.body)
+      if (validationError) {
+        res.status(400).json({ error: validationError })
+        return
+      }
+      const invitation = findInvitationByToken(req.params.token)
+      if (rejectUnusableInvitation(res, invitation)) return
+
+      const name = req.body.name.trim()
+      const email = req.body.email.trim().toLowerCase()
+      const password = req.body.password
+
+      if (invitation.type === 'email' && invitation.email !== email) {
+        res.status(403).json({ error: 'This invitation was issued for a different email address.' })
+        return
+      }
+
+      const existingUser = db.prepare('SELECT * FROM users WHERE lower(email) = ?').get(email)
+      if (existingUser) {
+        const expectedHash = existingUser.password_hash || (email === adminEmail.toLowerCase() ? passwordHash : null)
+        if (expectedHash) {
+          const matches = await bcrypt.compare(password, expectedHash)
+          if (!matches) {
+            res.status(401).json({ error: 'An account with this email already exists. Enter your existing password to accept this invitation.' })
+            return
+          }
+        }
+      }
+
+      const newPasswordHash = existingUser?.password_hash ? null : await bcrypt.hash(password, 10)
+      const acceptTx = db.transaction(() => {
+        const freshInvite = db.prepare(`
+          SELECT i.*, o.name AS organisation_name, o.slug AS organisation_slug
+          FROM invitations i
+          JOIN organisations o ON o.id = i.organisation_id
+          WHERE i.id = ?
+        `).get(invitation.id)
+        const state = freshInvite ? getInvitationState(freshInvite) : 'Invalid'
+        if (!freshInvite || state !== 'Active') {
+          return { errorStatus: state === 'Invalid' ? 404 : 410, error: 'This invitation is no longer active.', state }
+        }
+
+        const now = new Date().toISOString()
+        let user = db.prepare('SELECT * FROM users WHERE lower(email) = ?').get(email)
+        if (!user) {
+          const userId = `U-${randomUUID().slice(0, 8).toUpperCase()}`
+          db.prepare(`
+            INSERT INTO users (id, email, name, password_hash, email_verified_at, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+          `).run(userId, email, name, newPasswordHash, now, now)
+          user = db.prepare('SELECT * FROM users WHERE id = ?').get(userId)
+        } else if (!user.password_hash && newPasswordHash) {
+          db.prepare('UPDATE users SET password_hash = ? WHERE id = ?').run(newPasswordHash, user.id)
+        }
+
+        const existingMembership = db.prepare(`
+          SELECT m.*, u.name, u.email
+          FROM memberships m
+          JOIN users u ON u.id = m.user_id
+          WHERE m.user_id = ? AND m.organisation_id = ?
+        `).get(user.id, freshInvite.organisation_id)
+
+        if (existingMembership) {
+          if (existingMembership.status === 'Suspended') {
+            return { errorStatus: 403, error: 'Your membership in this organisation is currently suspended.' }
+          }
+          const linkedMentee = db.prepare('SELECT id FROM mentees WHERE lower(email) = ?').get(email)
+          return {
+            alreadyMember: true,
+            member: memberFromRow(existingMembership),
+            organisation: {
+              id: freshInvite.organisation_id,
+              name: freshInvite.organisation_name,
+              slug: freshInvite.organisation_slug,
+            },
+            menteeId: linkedMentee?.id || null,
+          }
+        }
+
+        const updated = db.prepare(`
+          UPDATE invitations SET uses = uses + 1
+          WHERE id = ? AND revoked = 0 AND uses < max_uses
+        `).run(freshInvite.id)
+        if (updated.changes === 0) {
+          return { errorStatus: 410, error: 'This invitation has reached its maximum number of uses.', state: 'Exhausted' }
+        }
+
+        const membershipId = `MEM-${randomUUID().slice(0, 8).toUpperCase()}`
+        db.prepare(`
+          INSERT INTO memberships (id, user_id, organisation_id, role, status, joined_at)
+          VALUES (?, ?, ?, ?, 'Active', ?)
+        `).run(membershipId, user.id, freshInvite.organisation_id, freshInvite.role, now)
+
+        let menteeId = null
+        if (freshInvite.role === 'Mentee') {
+          const existingMentee = db.prepare('SELECT id FROM mentees WHERE lower(email) = ?').get(email)
+          if (existingMentee) {
+            menteeId = existingMentee.id
+          } else {
+            menteeId = `M-${randomUUID().slice(0, 8).toUpperCase()}`
+            db.prepare('INSERT INTO mentees (id, name, email) VALUES (?, ?, ?)').run(menteeId, user.name, email)
+          }
+        }
+
+        const membershipRow = db.prepare(`
+          SELECT m.*, u.name, u.email
+          FROM memberships m
+          JOIN users u ON u.id = m.user_id
+          WHERE m.id = ?
+        `).get(membershipId)
+
+        return {
+          alreadyMember: false,
+          member: memberFromRow(membershipRow),
+          organisation: {
+            id: freshInvite.organisation_id,
+            name: freshInvite.organisation_name,
+            slug: freshInvite.organisation_slug,
+          },
+          menteeId,
+        }
+      })
+
+      const result = acceptTx.immediate()
+      if (result.errorStatus) {
+        res.status(result.errorStatus).json({ error: result.error, state: result.state })
+        return
+      }
+      res.status(result.alreadyMember ? 200 : 201).json(result)
+    } catch (error) {
+      next(error)
+    }
   })
 
   router.use(requireAdmin)
@@ -766,6 +1037,179 @@ export function createApp({ db, adminEmail, adminName = 'Administrator', passwor
     }
     const history = getReviewHistory(db, entityType, entityId)
     res.json({ history })
+  })
+
+  router.get('/members', (req, res) => {
+    const { page, limit, offset } = pagination(req, 100)
+    const search = typeof req.query.search === 'string' ? req.query.search.trim().toLowerCase() : ''
+    const role = typeof req.query.role === 'string' ? req.query.role : ''
+    const clauses = ['m.organisation_id = ?']
+    const params = [organisationId]
+    if (search) {
+      clauses.push('(lower(u.name) LIKE ? OR lower(u.email) LIKE ?)')
+      params.push(`%${search}%`, `%${search}%`)
+    }
+    if (['Owner', 'Admin', 'Mentor', 'Mentee'].includes(role)) {
+      clauses.push('m.role = ?')
+      params.push(role)
+    }
+    const where = `WHERE ${clauses.join(' AND ')}`
+    const total = db.prepare(`
+      SELECT COUNT(*) AS count
+      FROM memberships m
+      JOIN users u ON u.id = m.user_id
+      ${where}
+    `).get(...params).count
+    const rows = db.prepare(`
+      SELECT m.*, u.name, u.email
+      FROM memberships m
+      JOIN users u ON u.id = m.user_id
+      ${where}
+      ORDER BY CASE m.role WHEN 'Owner' THEN 0 WHEN 'Admin' THEN 1 WHEN 'Mentor' THEN 2 ELSE 3 END, m.joined_at DESC
+      LIMIT ? OFFSET ?
+    `).all(...params, limit, offset)
+    res.json({
+      organisation: {
+        id: workspace.organisation.id,
+        slug: workspace.organisation.slug,
+        name: workspace.organisation.name,
+      },
+      members: rows.map(memberFromRow),
+      pagination: { page, limit, total, pages: Math.max(1, Math.ceil(total / limit)) },
+    })
+  })
+
+  router.patch('/members/:id', verifyCsrf, (req, res) => {
+    const existing = db.prepare(`
+      SELECT m.*, u.name, u.email
+      FROM memberships m
+      JOIN users u ON u.id = m.user_id
+      WHERE m.id = ? AND m.organisation_id = ?
+    `).get(req.params.id, organisationId)
+    if (!existing) {
+      res.status(404).json({ error: 'Member not found.' })
+      return
+    }
+    if (existing.role === 'Owner') {
+      res.status(403).json({ error: 'The workspace owner cannot be modified.' })
+      return
+    }
+    const nextRole = req.body?.role !== undefined ? req.body.role : existing.role
+    const nextStatus = req.body?.status !== undefined ? req.body.status : existing.status
+    if (!INVITABLE_ROLES.includes(nextRole)) {
+      res.status(400).json({ error: 'Role must be Admin, Mentor, or Mentee.' })
+      return
+    }
+    if (!MEMBER_STATUSES.includes(nextStatus)) {
+      res.status(400).json({ error: 'Status must be Active or Suspended.' })
+      return
+    }
+    const updateTx = db.transaction(() => {
+      db.prepare(`
+        UPDATE memberships SET role = ?, status = ?
+        WHERE id = ? AND organisation_id = ?
+      `).run(nextRole, nextStatus, req.params.id, organisationId)
+      if (nextRole === 'Mentee') {
+        const existingMentee = db.prepare('SELECT id FROM mentees WHERE lower(email) = ?').get(existing.email.toLowerCase())
+        if (!existingMentee) {
+          db.prepare('INSERT INTO mentees (id, name, email) VALUES (?, ?, ?)').run(
+            `M-${randomUUID().slice(0, 8).toUpperCase()}`,
+            existing.name,
+            existing.email.toLowerCase(),
+          )
+        }
+      }
+    })
+    updateTx()
+    const row = db.prepare(`
+      SELECT m.*, u.name, u.email
+      FROM memberships m
+      JOIN users u ON u.id = m.user_id
+      WHERE m.id = ? AND m.organisation_id = ?
+    `).get(req.params.id, organisationId)
+    res.json({ member: memberFromRow(row) })
+  })
+
+  router.delete('/members/:id', verifyCsrf, (req, res) => {
+    const existing = db.prepare(`
+      SELECT * FROM memberships WHERE id = ? AND organisation_id = ?
+    `).get(req.params.id, organisationId)
+    if (!existing) {
+      res.status(404).json({ error: 'Member not found.' })
+      return
+    }
+    if (existing.role === 'Owner') {
+      res.status(403).json({ error: 'The workspace owner cannot be removed.' })
+      return
+    }
+    db.prepare('DELETE FROM memberships WHERE id = ? AND organisation_id = ?').run(req.params.id, organisationId)
+    res.json({ ok: true })
+  })
+
+  router.get('/invitations', (req, res) => {
+    const { page, limit, offset } = pagination(req, 100)
+    const search = typeof req.query.search === 'string' ? req.query.search.trim().toLowerCase() : ''
+    const clauses = ['organisation_id = ?']
+    const params = [organisationId]
+    if (search) {
+      clauses.push('(lower(id) LIKE ? OR lower(coalesce(email, \'\')) LIKE ?)')
+      params.push(`%${search}%`, `%${search}%`)
+    }
+    const where = `WHERE ${clauses.join(' AND ')}`
+    const total = db.prepare(`SELECT COUNT(*) AS count FROM invitations ${where}`).get(...params).count
+    const rows = db.prepare(`
+      SELECT * FROM invitations ${where}
+      ORDER BY created_at DESC, id DESC
+      LIMIT ? OFFSET ?
+    `).all(...params, limit, offset)
+    res.json({
+      invitations: rows.map(invitationFromRow),
+      pagination: { page, limit, total, pages: Math.max(1, Math.ceil(total / limit)) },
+    })
+  })
+
+  router.post('/invitations', verifyCsrf, (req, res) => {
+    const validationError = validateInvitationCreate(req.body)
+    if (validationError) {
+      res.status(400).json({ error: validationError })
+      return
+    }
+    const type = req.body.type
+    const role = req.body.role
+    const days = Number(req.body.days ?? 7)
+    const maxUses = type === 'email' ? 1 : Number(req.body.maxUses ?? 10)
+    const email = type === 'email' ? req.body.email.trim().toLowerCase() : null
+    const now = new Date()
+    const createdAt = now.toISOString()
+    const expiresAt = new Date(now.getTime() + days * 86400000).toISOString()
+    const id = `INV-${randomUUID().slice(0, 8).toUpperCase()}`
+    const token = `MUNA-${randomBytes(16).toString('base64url')}`
+    const tokenHash = hashInvitationToken(token)
+
+    db.prepare(`
+      INSERT INTO invitations (id, organisation_id, type, email, role, token_hash, created_by, created_at, expires_at, max_uses, uses, revoked)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0)
+    `).run(id, organisationId, type, email, role, tokenHash, req.session.admin.name, createdAt, expiresAt, maxUses)
+
+    const row = db.prepare('SELECT * FROM invitations WHERE id = ?').get(id)
+    res.status(201).json({
+      invitation: {
+        ...invitationFromRow(row),
+        token,
+        acceptPath: `/invite/${token}`,
+      },
+    })
+  })
+
+  router.delete('/invitations/:id', verifyCsrf, (req, res) => {
+    const existing = db.prepare('SELECT * FROM invitations WHERE id = ? AND organisation_id = ?').get(req.params.id, organisationId)
+    if (!existing) {
+      res.status(404).json({ error: 'Invitation not found.' })
+      return
+    }
+    db.prepare('UPDATE invitations SET revoked = 1 WHERE id = ? AND organisation_id = ?').run(req.params.id, organisationId)
+    const row = db.prepare('SELECT * FROM invitations WHERE id = ? AND organisation_id = ?').get(req.params.id, organisationId)
+    res.json({ ok: true, invitation: invitationFromRow(row) })
   })
 
   app.use('/api', router)
