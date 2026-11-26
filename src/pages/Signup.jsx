@@ -3,8 +3,11 @@ import Button from '../components/ui/Button'
 import Input from '../components/ui/Input'
 import { ShieldCheck } from '../icons'
 import apiRequest, { cacheCsrfToken, requestCsrfToken } from '../dashboard/services/adminApi'
+import { isSupabaseConfigured, supabase } from '../lib/supabase'
+import { useAuth } from '../lib/authContext'
 
 export default function Signup() {
+  const { refreshMemberships } = useAuth()
   const [role, setRole] = useState(
     new URLSearchParams(window.location.search).get('role') === 'mentee'
       ? 'mentee'
@@ -63,6 +66,61 @@ export default function Signup() {
       )
     } catch (error) {
       setNotice(error.message)
+    if (!isSupabaseConfigured || !supabase) {
+      setNotice('Supabase is not configured yet. Add VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY to .env.local.')
+      return
+    }
+
+    const formData = new FormData(event.currentTarget)
+    const fullName = String(formData.get('name') || '').trim()
+    const email = String(formData.get('email') || '').trim()
+    const password = String(formData.get('password') || '')
+    const orgName = String(formData.get('organisation') || '').trim()
+    const invitationCode = String(formData.get('invitation') || '').trim()
+
+    setSubmitting(true)
+    setNotice('')
+
+    try {
+      const { data, error } = await supabase.auth.signUp({
+        email,
+        password,
+        options: {
+          data: {
+            full_name: fullName,
+            pending_org_name: role === 'mentor' ? orgName : null,
+            pending_invite_code: role === 'mentee' ? invitationCode : null,
+          },
+        },
+      })
+
+      if (error) {
+        setNotice(error.message)
+        return
+      }
+
+      if (!data.session) {
+        setNotice('Account created! Please check your email to verify your address, then log in.')
+        return
+      }
+
+      if (role === 'mentor' && orgName) {
+        const { error: orgError } = await supabase.rpc('create_organisation', {
+          org_name: orgName,
+        })
+        if (orgError) {
+          setNotice(`Account created, but organisation setup failed: ${orgError.message}`)
+          return
+        }
+        await supabase.auth.updateUser({ data: { pending_org_name: null } })
+        await refreshMemberships()
+        window.location.href = '/#/dashboard'
+        return
+      }
+
+      setNotice('Account created! Invitation redemption will be enabled in Phase 1.')
+    } catch (err) {
+      setNotice(err?.message || 'Unable to create account right now.')
     } finally {
       setSubmitting(false)
     }
@@ -206,6 +264,10 @@ export default function Signup() {
             )}
             <Button className="auth-submit" type="submit" disabled={submitting}>
               {submitting ? 'Creating account…' : `Create ${role === 'mentor' ? 'mentor' : 'mentee'} account`}
+            <Button className="auth-submit" type="submit" disabled={submitting}>
+              {submitting
+                ? 'Creating account...'
+                : `Create ${role === 'mentor' ? 'mentor' : 'mentee'} account`}
             </Button>
           </form>
 
