@@ -1,0 +1,259 @@
+.assessments-view {
+  display: grid;
+  gap: 18px;
+}
+
+.assessments-view .welcome-row {
+  margin-bottom: 0;
+}
+
+.assessment-stats {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.assessment-stat {
+  display: flex;
+  min-height: 76px;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px 18px;
+}
+
+.assessment-stat span {
+  color: #77798b;
+  font-size: 11px;
+}
+
+.assessment-stat strong {
+  color: #343449;
+  font-size: 22px;
+}
+
+.assessment-attempt-note {
+  padding: 12px 15px;
+  border: 1px solid #e8e6ff;
+  border-radius: 9px;
+  background: #f7f6ff;
+  color: #66618e;
+  font-size: 11px;
+  line-height: 1.6;
+}
+
+.assessment-attempt-note strong {
+  color: #504a9e;
+}
+
+.assessment-list-panel {
+  padding-bottom: 5px;
+}
+
+.assessment-list {
+  display: grid;
+}
+
+.assessment-row {
+  display: grid;
+  grid-template-columns: minmax(220px, 2fr) minmax(125px, 1fr) minmax(120px, .8fr) auto;
+  align-items: center;
+  gap: 18px;
+  padding: 18px 0;
+  border-top: 1px solid #f0f0f5;
+}
+
+.assessment-main {
+  min-width: 0;
+}
+
+.assessment-title-line {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.assessment-title-line h3 {
+  margin: 0;
+  color: #36374b;
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.assessment-status {
+  padding: 4px 8px;
+  border-radius: 12px;
+  font-size: 9px;
+  font-weight: 650;
+}
+
+.assessment-status-draft {
+  background: #f0f1f5;
+  color: #77798a;
+}
+
+.assessment-status-published {
+  background: #eaf7f0;
+  color: #4a9b71;
+}
+
+.assessment-status-paused {
+  background: #fff5e9;
+  color: #bd8137;
+}
+
+.assessment-description {
+  overflow: hidden;
+  margin: 6px 0 0;
+  color: #85879a;
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.assessment-question-count {
+  display: block;
+  margin-top: 9px;
+  color: #77798b;
+  font-size: 10px;
+}
+
+.assessment-question-preview {
+  display: grid;
+  gap: 3px;
+  margin-top: 5px;
+}
+
+.assessment-question-preview span {
+  overflow: hidden;
+  color: #9a9baa;
+  font-size: 9px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.assessment-column-label {
+  display: block;
+  margin-bottom: 8px;
+  color: #a0a2b0;
+  font-size: 8px;
+  font-weight: 700;
+  letter-spacing: .45px;
+}
+
+.assessment-mentee-avatars {
+  display: flex;
+  align-items: center;
+  padding-left: 2px;
+}
+
+.assessment-mentee-avatar,
+.assessment-mentee-more {
+  display: grid;
+  width: 25px;
+  height: 25px;
+  margin-left: -2px;
+  place-items: center;
+  border: 2px solid #fff;
+  border-radius: 50%;
+  background: #eeeaff;
+  color: #665bb4;
+  font-size: 8px;
+  font-weight: 700;
+}
+
+.assessment-mentee-avatar:nth-child(2n) {
+  background: #e7f2ff;
+  color: #507aab;
+}
+
+.assessment-mentee-avatar:nth-child(3n) {
+  background: #fff0e8;
+  color: #ad7451;
+}
+
+.assessment-mentee-more {
+  background: #f1f1f6;
+  color: #7e8091;
+}
+
+.assessment-assignee-names {
+  display: block;
+  margin-top: 5px;
+  color: #77798b;
+  font-size: 9px;
+}
+
+.assessment-attempts {
+  display: flex;
+  align-items: baseline;
+  gap: 5px;
+  color: #77798b;
+  font-size: 10px;
+}
+
+.assessment-attempts .assessment-column-label {
+  flex-basis: 100%;
+}
+
+.assessment-attempts {
+  flex-wrap: wrap;
+}
+
+.assessment-attempts strong {
+  color: #343449;
+  font-size: 16px;
+}
+
+.assessment-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.assessment-action-button {
+  min-width: 78px;
+  min-height: 32px;
+  justify-content: center;
+  padding: 0 10px;
+  font-size: 10px;
+}
+
+.assessment-empty {
+  display: grid;
+  justify-items: center;
+  padding: 42px 18px 48px;
+  border-top: 1px solid #f0f0f5;
+  text-align: center;
+}
+
+.assessment-empty-mark {
+  display: grid;
+  width: 42px;
+  height: 42px;
+  margin-bottom: 13px;
+  place-items: center;
+  border-radius: 12px;
+  background: #f0efff;
+  color: #655bd4;
+  font-weight: 700;
+}
+
+.assessment-empty strong {
+  color: #414257;
+  font-size: 12px;
+}
+
+.assessment-empty p,
+.assessment-data-note {
+  color: #9294a3;
+  font-size: 10px;
+}
+
+.assessment-empty p {
+  margin: 7px 0 16px;
+}
+
+.assessment-data-note {
+  margin: -7px 0 0;
+  text-align: right;
+}

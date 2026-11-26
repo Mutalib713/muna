@@ -1,17 +1,10 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import request from 'supertest'
-import { createApp } from './app.js'
-import { createDatabase } from './db.js'
+import { bootstrapAdmin, createTestContext } from './helpers.js'
 
 test('admin APIs require a session and persist questions, assessments, and review decisions', async () => {
-  const db = createDatabase(':memory:')
-  const app = createApp({
-    db,
-    setupCode: 'test-setup-code',
-    sessionSecret: 'test-session-secret-long-enough-for-tests',
-  })
-  const client = request.agent(app)
+  const { db, agent } = createTestContext()
+  const client = agent()
 
   const anonymousQuestions = await client.get('/api/questions')
   assert.equal(anonymousQuestions.status, 401)
@@ -40,9 +33,7 @@ test('admin APIs require a session and persist questions, assessments, and revie
     .send({ name: 'Test Admin', email: 'admin@example.test', password: 'test-admin-password-2026', confirmPassword: 'a-different-password', setupCode: 'test-setup-code' })
   assert.equal(mismatchedPassword.status, 400)
 
-  const setup = await client.post('/api/auth/setup')
-    .set('X-CSRF-Token', anonymousCsrf)
-    .send({ name: 'Test Admin', email: 'admin@example.test', password: 'test-admin-password-2026', confirmPassword: 'test-admin-password-2026', setupCode: 'test-setup-code' })
+  const setup = await bootstrapAdmin(client, { name: 'Test Admin', email: 'admin@example.test' })
   assert.equal(setup.status, 200)
   assert.equal(setup.body.user.name, 'Test Admin')
   assert.notEqual(db.prepare('SELECT password_hash FROM admin_account').get().password_hash, 'test-admin-password-2026')
@@ -97,7 +88,7 @@ test('admin APIs require a session and persist questions, assessments, and revie
 
   const mentees = await client.get('/api/mentees')
   assert.equal(mentees.status, 200)
-  assert.equal(mentees.body.mentees.length, 0)
+  assert.equal(mentees.body.mentees.length, 5)
 
   const mentee = await client.post('/api/mentees')
     .set('X-CSRF-Token', csrfToken)
@@ -141,7 +132,7 @@ test('admin APIs require a session and persist questions, assessments, and revie
 
   const submissions = await client.get('/api/answers')
   assert.equal(submissions.status, 200)
-  assert.equal(submissions.body.answers.length, 1)
+  assert.equal(submissions.body.answers.length, 6)
   const submissionId = submissions.body.answers[0].id
 
   const review = await client.patch(`/api/answers/${submissionId}/review`)
@@ -173,13 +164,8 @@ test('admin APIs require a session and persist questions, assessments, and revie
 })
 
 test('only one concurrent setup request can create the admin account', async () => {
-  const db = createDatabase(':memory:')
-  const app = createApp({
-    db,
-    setupCode: 'test-setup-code',
-    sessionSecret: 'test-session-secret-long-enough-for-tests',
-  })
-  const clients = [request.agent(app), request.agent(app)]
+  const { db, agent } = createTestContext()
+  const clients = [agent(), agent()]
   const tokens = await Promise.all(clients.map(async (client) => (await client.get('/api/auth/csrf')).body.csrfToken))
   const responses = await Promise.all(clients.map((client, index) => client.post('/api/auth/setup')
     .set('X-CSRF-Token', tokens[index])

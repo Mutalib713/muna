@@ -2,59 +2,66 @@ import { useState } from 'react'
 import Button from '../components/ui/Button'
 import Input from '../components/ui/Input'
 import { ShieldCheck } from '../icons'
-import { isSupabaseConfigured, supabase } from '../lib/supabase'
-import { useAuth } from '../lib/authContext'
+import apiRequest, { cacheCsrfToken, requestCsrfToken } from '../dashboard/services/adminApi'
 
 export default function Login() {
-  const { refreshMemberships } = useAuth()
+  const [email, setEmail] = useState('')
+  const [password, setPassword] = useState('')
   const [notice, setNotice] = useState('')
+  const [unverifiedUser, setUnverifiedUser] = useState(false)
+  const [devVerifyToken, setDevVerifyToken] = useState('')
   const [submitting, setSubmitting] = useState(false)
+  const [resending, setResending] = useState(false)
 
   const handleSubmit = async (event) => {
     event.preventDefault()
-    if (!isSupabaseConfigured || !supabase) {
-      setNotice('Supabase is not configured yet. Add VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY to .env.local.')
-      return
-    }
-
-    const formData = new FormData(event.currentTarget)
-    const email = String(formData.get('email') || '').trim()
-    const password = String(formData.get('password') || '')
-
-    setSubmitting(true)
     setNotice('')
-
+    setUnverifiedUser(false)
+    setDevVerifyToken('')
+    setSubmitting(true)
     try {
-      const { data, error } = await supabase.auth.signInWithPassword({ email, password })
-      if (error) {
-        setNotice(error.message)
+      const { csrfToken } = await requestCsrfToken()
+      const data = await apiRequest('/auth/login', {
+        method: 'POST',
+        body: { email, password },
+        csrfToken,
+      })
+      cacheCsrfToken(data.csrfToken)
+      if (!data.user?.emailVerified) {
+        setUnverifiedUser(true)
+        setNotice('Verify your email address before opening your workspace.')
         return
       }
-
-      let memberships = await refreshMemberships()
-
-      // Complete pending mentor organisation creation if user confirmed email after signup
-      const pendingOrg = data.user?.user_metadata?.pending_org_name
-      if (memberships.length === 0 && pendingOrg) {
-        const { error: orgError } = await supabase.rpc('create_organisation', {
-          org_name: pendingOrg,
-        })
-        if (!orgError) {
-          await supabase.auth.updateUser({ data: { pending_org_name: null } })
-          memberships = await refreshMemberships()
-        }
+      const org = data.organisation || data.organisations?.[0]
+      if (org && ['Owner', 'Admin', 'Mentor'].includes(org.role)) {
+        window.location.assign(`/o/${encodeURIComponent(org.slug)}`)
+        return
       }
-
-      const primaryRole = memberships[0]?.role
-      if (primaryRole === 'mentee') {
-        window.location.href = '/#/learner'
-      } else {
-        window.location.href = '/#/dashboard'
+      if (org?.menteeId) {
+        window.location.assign(`/#/learner/${encodeURIComponent(org.menteeId)}`)
+        return
       }
-    } catch (err) {
-      setNotice(err?.message || 'Unable to log in right now.')
+      window.location.assign('/#/learner')
+    } catch (error) {
+      setNotice(error.message)
     } finally {
       setSubmitting(false)
+    }
+  }
+
+  const handleResend = async () => {
+    setResending(true)
+    try {
+      const { csrfToken } = await requestCsrfToken()
+      const data = await apiRequest('/auth/resend-verification', { method: 'POST', csrfToken })
+      if (data.verificationToken) {
+        setDevVerifyToken(data.verificationToken)
+      }
+      setNotice('Verification email re-issued. Check your inbox or click verify below.')
+    } catch (error) {
+      setNotice(error.message)
+    } finally {
+      setResending(false)
     }
   }
 
@@ -92,11 +99,44 @@ export default function Login() {
           <p className="auth-description">Enter your details to access your organisation workspace.</p>
 
           <form className="auth-form" onSubmit={handleSubmit}>
-            <Input id="login-email" label="Email address" name="email" type="email" autoComplete="email" placeholder="you@example.com" required />
-            <Input id="login-password" label="Password" name="password" type="password" autoComplete="current-password" placeholder="Enter your password" required />
+            <Input
+              id="login-email"
+              label="Email address"
+              name="email"
+              type="email"
+              autoComplete="email"
+              placeholder="you@example.com"
+              value={email}
+              onChange={(event) => setEmail(event.target.value)}
+              required
+            />
+            <Input
+              id="login-password"
+              label="Password"
+              name="password"
+              type="password"
+              autoComplete="current-password"
+              placeholder="Enter your password"
+              value={password}
+              onChange={(event) => setPassword(event.target.value)}
+              required
+            />
             {notice && <p className="auth-notice" role="status">{notice}</p>}
+            {unverifiedUser && (
+              <div style={{ display: 'grid', gap: '8px' }}>
+                <Button className="auth-submit" type="button" variant="secondary" disabled={resending} onClick={handleResend}>
+                  {resending ? 'Sending…' : 'Resend verification email'}
+                </Button>
+                <a
+                  className="auth-home-link"
+                  href={devVerifyToken ? `/verify-email?token=${encodeURIComponent(devVerifyToken)}` : '/verify-email'}
+                >
+                  Open email verification page
+                </a>
+              </div>
+            )}
             <Button className="auth-submit" type="submit" disabled={submitting}>
-              {submitting ? 'Logging in...' : 'Log in'}
+              {submitting ? 'Logging in…' : 'Log in'}
             </Button>
           </form>
 

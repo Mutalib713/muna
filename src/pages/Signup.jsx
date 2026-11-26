@@ -2,6 +2,7 @@ import { useState } from 'react'
 import Button from '../components/ui/Button'
 import Input from '../components/ui/Input'
 import { ShieldCheck } from '../icons'
+import apiRequest, { cacheCsrfToken, requestCsrfToken } from '../dashboard/services/adminApi'
 import { isSupabaseConfigured, supabase } from '../lib/supabase'
 import { useAuth } from '../lib/authContext'
 
@@ -12,11 +13,59 @@ export default function Signup() {
       ? 'mentee'
       : 'mentor',
   )
+  const [name, setName] = useState('')
+  const [email, setEmail] = useState('')
+  const [password, setPassword] = useState('')
+  const [organisation, setOrganisation] = useState('')
+  const [invitationCode, setInvitationCode] = useState('')
   const [notice, setNotice] = useState('')
+  const [joinedResult, setJoinedResult] = useState(null)
+  const [mentorSignupResult, setMentorSignupResult] = useState(null)
   const [submitting, setSubmitting] = useState(false)
 
   const handleSubmit = async (event) => {
     event.preventDefault()
+    setNotice('')
+    setJoinedResult(null)
+    setMentorSignupResult(null)
+    setSubmitting(true)
+    try {
+      const { csrfToken } = await requestCsrfToken()
+      if (role === 'mentor') {
+        const result = await apiRequest('/auth/signup', {
+          method: 'POST',
+          body: {
+            name,
+            email,
+            password,
+            organisationName: organisation,
+          },
+          csrfToken,
+        })
+        if (result.csrfToken) cacheCsrfToken(result.csrfToken)
+        setMentorSignupResult(result)
+        setNotice(`Workspace "${result.organisation.name}" created. Verify your email address to activate it.`)
+        return
+      }
+
+      const token = invitationCode.trim()
+      if (!token) {
+        setNotice('Enter the invitation code from your mentor.')
+        return
+      }
+      const result = await apiRequest(`/invitations/${encodeURIComponent(token)}/accept`, {
+        method: 'POST',
+        body: { name, email, password },
+        csrfToken,
+      })
+      setJoinedResult(result)
+      setNotice(
+        result.alreadyMember
+          ? `You are already an active ${result.member.role} in ${result.organisation.name}.`
+          : `Welcome to ${result.organisation.name}! Joined as ${result.member.role}.`,
+      )
+    } catch (error) {
+      setNotice(error.message)
     if (!isSupabaseConfigured || !supabase) {
       setNotice('Supabase is not configured yet. Add VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY to .env.local.')
       return
@@ -137,8 +186,27 @@ export default function Signup() {
           </fieldset>
 
           <form className="auth-form" onSubmit={handleSubmit}>
-            <Input id="full-name" label="Full name" name="name" autoComplete="name" placeholder="Your name" required />
-            <Input id="signup-email" label="Email address" name="email" type="email" autoComplete="email" placeholder="you@example.com" required />
+            <Input
+              id="full-name"
+              label="Full name"
+              name="name"
+              autoComplete="name"
+              placeholder="Your name"
+              value={name}
+              onChange={(event) => setName(event.target.value)}
+              required
+            />
+            <Input
+              id="signup-email"
+              label="Email address"
+              name="email"
+              type="email"
+              autoComplete="email"
+              placeholder="you@example.com"
+              value={email}
+              onChange={(event) => setEmail(event.target.value)}
+              required
+            />
             <Input
               id="signup-password"
               label="Password"
@@ -148,14 +216,54 @@ export default function Signup() {
               minLength={8}
               placeholder="At least 8 characters"
               hint="Use at least 8 characters."
+              value={password}
+              onChange={(event) => setPassword(event.target.value)}
               required
             />
             {role === 'mentor' ? (
-              <Input id="organisation-name" label="Organisation name" name="organisation" autoComplete="organization" placeholder="e.g. Bright Minds Academy" required />
+              <Input
+                id="organisation-name"
+                label="Organisation name"
+                name="organisation"
+                autoComplete="organization"
+                placeholder="e.g. Bright Minds Academy"
+                value={organisation}
+                onChange={(event) => setOrganisation(event.target.value)}
+                required
+              />
             ) : (
-              <Input id="invitation-code" label="Invitation code" name="invitation" placeholder="Enter the code from your mentor" required />
+              <Input
+                id="invitation-code"
+                label="Invitation code"
+                name="invitation"
+                placeholder="Enter the code from your mentor"
+                value={invitationCode}
+                onChange={(event) => setInvitationCode(event.target.value)}
+                required
+              />
             )}
             {notice && <p className="auth-notice" role="status">{notice}</p>}
+            {mentorSignupResult && (
+              <a
+                className="auth-home-link"
+                href={
+                  mentorSignupResult.verificationToken
+                    ? `/verify-email?token=${encodeURIComponent(mentorSignupResult.verificationToken)}`
+                    : '/verify-email'
+                }
+              >
+                {mentorSignupResult.verificationToken
+                  ? 'Verify email and open your workspace'
+                  : 'Go to email verification'}
+              </a>
+            )}
+            {joinedResult?.menteeId && (
+              <a className="auth-home-link" href={`/#/learner/${encodeURIComponent(joinedResult.menteeId)}`}>
+                Open your assigned assessments (ID: {joinedResult.menteeId})
+              </a>
+            )}
+            <Button className="auth-submit" type="submit" disabled={submitting}>
+              {submitting ? 'Creating account…' : `Create ${role === 'mentor' ? 'mentor' : 'mentee'} account`}
             <Button className="auth-submit" type="submit" disabled={submitting}>
               {submitting
                 ? 'Creating account...'
