@@ -243,6 +243,25 @@
   text-align: center;
 }
 
+.admin-auth-footnote-secondary {
+  margin-top: 10px;
+}
+
+.admin-auth-link {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: #5348c7;
+  cursor: pointer;
+  font: inherit;
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.admin-auth-link:hover {
+  text-decoration: underline;
+}
+
 .admin-auth-loading {
   display: flex;
   align-items: center;

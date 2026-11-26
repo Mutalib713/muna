@@ -22,9 +22,17 @@ export function useWorkspaceAuth(orgSlug = '', { applyDashboardData, clearDomain
   const [loginError, setLoginError] = useState('')
   const [loginLoading, setLoginLoading] = useState(false)
   const [setupForm, setSetupForm] = useState({ name: '', email: '', password: '', confirmPassword: '', setupCode: '' })
+  const [setupAvailable, setSetupAvailable] = useState(false)
   const [setupError, setSetupError] = useState('')
   const [setupLoading, setSetupLoading] = useState(false)
   const [apiError, setApiError] = useState('')
+
+  function toggleSetupMode(enableSetup) {
+    setApiError('')
+    setLoginError('')
+    setSetupError('')
+    setAuthStatus(enableSetup ? 'setup-required' : 'unauthenticated')
+  }
 
   function clearWorkspaceState() {
     setAdmin(null)
@@ -67,10 +75,7 @@ export function useWorkspaceAuth(orgSlug = '', { applyDashboardData, clearDomain
         ])
         if (!active) return
         setCsrfToken(token)
-        if (setupRequired && !orgSlug) {
-          setAuthStatus('setup-required')
-          return
-        }
+        setSetupAvailable(Boolean(setupRequired))
         try {
           const me = await apiRequest('/auth/me')
           if (!active) return
@@ -225,6 +230,7 @@ export function useWorkspaceAuth(orgSlug = '', { applyDashboardData, clearDomain
       if (organisation?.id) setActiveOrganisationId(organisation.id)
       applyDashboardData(await loadDashboardData())
       setSetupForm({ name: '', email: '', password: '', confirmPassword: '', setupCode: '' })
+      setSetupAvailable(false)
       setAuthStatus('authenticated')
     } catch (error) {
       setSetupError(error.message)
@@ -261,6 +267,8 @@ export function useWorkspaceAuth(orgSlug = '', { applyDashboardData, clearDomain
     loginLoading,
     setupForm,
     setSetupForm,
+    setupAvailable,
+    toggleSetupMode,
     setSetupError,
     setupError,
     setupLoading,

@@ -265,6 +265,8 @@ export function useDashboardWorkspace(orgSlug = '') {
     loginLoading: auth.loginLoading,
     setupForm: auth.setupForm,
     setSetupForm: auth.setSetupForm,
+    setupAvailable: auth.setupAvailable,
+    toggleSetupMode: auth.toggleSetupMode,
     setSetupError: auth.setSetupError,
     setupError: auth.setupError,
     setupLoading: auth.setupLoading,

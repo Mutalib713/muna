@@ -111,6 +111,7 @@ export default function AdminDashboard({ orgSlug = '' }) {
     return (
       <AdminLoginScreen
         setupRequired={ws.authStatus === 'setup-required'}
+        setupAvailable={ws.setupAvailable}
         email={ws.loginEmail}
         password={ws.loginPassword}
         setupForm={ws.setupForm}
@@ -122,6 +123,7 @@ export default function AdminDashboard({ orgSlug = '' }) {
           ws.setSetupForm((current) => ({ ...current, [field]: value }))
           ws.setSetupError('')
         }}
+        onToggleSetup={ws.toggleSetupMode}
         onSubmit={ws.authStatus === 'setup-required' ? ws.handleSetup : ws.handleLogin}
       />
     )
